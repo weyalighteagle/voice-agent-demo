@@ -1,171 +1,213 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { RealtimeClient } from "@openai/realtime-api-beta";
-// @ts-expect-error - External library without type definitions
-import { WavRecorder, WavStreamPlayer } from "./lib/wavtools/index.js";
-import { instructions } from "./conversation_config.js";
+import { useEffect, useRef, useCallback, useState } from "react";
 import "./App.css";
 
-const clientRef = { current: null as RealtimeClient | null };
-const wavRecorderRef = { current: null as WavRecorder | null };
-const wavStreamPlayerRef = { current: null as WavStreamPlayer | null };
+type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 
-export function App() {
+const BACKOFF = [1000, 2000, 4000, 8000, 30000];
+
+export default function App() {
+  const [status, setStatus] = useState<ConnectionStatus>("idle");
+  const [statusDetail, setStatusDetail] = useState("");
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldReconnectRef = useRef(true);
+  // Queue of PCM16 chunks to play sequentially
+  const playbackQueueRef = useRef<ArrayBuffer[]>([]);
+  const isPlayingRef = useRef(false);
+
   const params = new URLSearchParams(window.location.search);
-  const RELAY_SERVER_URL = params.get("wss");
-  const [connectionStatus, setConnectionStatus] = useState<
-    "disconnected" | "connecting" | "connected"
-  >("disconnected");
+  const relayUrl = params.get("wss");
 
-  if (!clientRef.current) {
-    clientRef.current = new RealtimeClient({
-      url: RELAY_SERVER_URL || undefined,
-    });
-  }
-  if (!wavRecorderRef.current) {
-    wavRecorderRef.current = new WavRecorder({ sampleRate: 24000 });
-  }
-  if (!wavStreamPlayerRef.current) {
-    wavStreamPlayerRef.current = new WavStreamPlayer({ sampleRate: 24000 });
-  }
-  const isConnectedRef = useRef(false);
-  const connectConversation = useCallback(async () => {
-    if (isConnectedRef.current) return;
-    isConnectedRef.current = true;
-    setConnectionStatus("connecting");
-    const client = clientRef.current;
-    const wavRecorder = wavRecorderRef.current;
-    const wavStreamPlayer = wavStreamPlayerRef.current;
-    if (!client || !wavRecorder || !wavStreamPlayer) return;
+  // ── Audio playback ────────────────────────────────────────────────────────
+  const playNextChunk = useCallback(async () => {
+    if (isPlayingRef.current || playbackQueueRef.current.length === 0) return;
+    if (!audioCtxRef.current) return;
 
-    try {
-      // Connect to microphone
-      await wavRecorder.begin();
+    isPlayingRef.current = true;
+    const chunk = playbackQueueRef.current.shift()!;
 
-      // Connect to audio output
-      await wavStreamPlayer.connect();
-
-      // Connect to realtime API
-      await client.connect();
-
-      setConnectionStatus("connected");
-
-      client.on("error", (event: any) => {
-        console.error(event);
-        setConnectionStatus("disconnected");
-      });
-
-      client.on("disconnected", () => {
-        setConnectionStatus("disconnected");
-      });
-
-      client.sendUserMessageContent([
-        {
-          type: `input_text`,
-          text: `Hello!`,
-        },
-      ]);
-
-      // Always use VAD mode
-      client.updateSession({
-        turn_detection: { type: "server_vad" },
-      });
-
-      // Check if we're already recording before trying to pause
-      if (wavRecorder.recording) {
-        await wavRecorder.pause();
-      }
-
-      // Check if we're already paused before trying to record
-      if (!wavRecorder.recording) {
-        await wavRecorder.record((data: { mono: Float32Array }) =>
-          client.appendInputAudio(data.mono)
-        );
-      }
-    } catch (error) {
-      console.error("Connection error:", error);
-      setConnectionStatus("disconnected");
+    // PCM16 little-endian → Float32
+    const pcm16 = new Int16Array(chunk);
+    const float32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) {
+      float32[i] = pcm16[i] / 32768;
     }
+
+    const audioBuffer = audioCtxRef.current.createBuffer(
+      1,
+      float32.length,
+      24000 // OpenAI outputs 24kHz PCM16
+    );
+    audioBuffer.getChannelData(0).set(float32);
+
+    const source = audioCtxRef.current.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtxRef.current.destination);
+    source.onended = () => {
+      isPlayingRef.current = false;
+      playNextChunk();
+    };
+    source.start();
   }, []);
 
-  const errorMessage = !RELAY_SERVER_URL
-    ? 'Missing required "wss" parameter in URL'
-    : (() => {
-        try {
-          new URL(RELAY_SERVER_URL);
-          return null;
-        } catch {
-          return 'Invalid URL format for "wss" parameter';
-        }
-      })();
+  const clearPlaybackQueue = useCallback(() => {
+    playbackQueueRef.current = [];
+    isPlayingRef.current = false;
+  }, []);
 
-  /**
-   * Core RealtimeClient and audio capture setup
-   * Set all of our instructions, tools, events and more
-   */
-  useEffect(() => {
-    // Only run the effect if there's no error
-    if (!errorMessage) {
-      connectConversation();
-      const wavStreamPlayer = wavStreamPlayerRef.current;
-      const client = clientRef.current;
-      if (!client || !wavStreamPlayer) return;
-
-      // Set instructions
-      client.updateSession({ instructions: instructions });
-
-      // handle realtime events from client + server for event logging
-      client.on("error", (event: any) => console.error(event));
-      client.on("conversation.interrupted", async () => {
-        const trackSampleOffset = await wavStreamPlayer.interrupt();
-        if (trackSampleOffset?.trackId) {
-          const { trackId, offset } = trackSampleOffset;
-          await client.cancelResponse(trackId, offset);
-        }
-      });
-      client.on("conversation.updated", async ({ item, delta }: any) => {
-        client.conversation.getItems();
-        if (delta?.audio) {
-          wavStreamPlayer.add16BitPCM(delta.audio, item.id);
-        }
-        if (item.status === "completed" && item.formatted.audio?.length) {
-          const wavFile = await WavRecorder.decode(
-            item.formatted.audio,
-            24000,
-            24000
-          );
-          item.formatted.file = wavFile;
-        }
-      });
-
-      return () => {
-        client.reset();
-      };
+  // ── WebSocket + microphone ────────────────────────────────────────────────
+  const connect = useCallback(async () => {
+    if (!relayUrl) {
+      setStatus("error");
+      setStatusDetail("Missing ?wss= parameter");
+      return;
     }
-  }, [errorMessage]);
+
+    setStatus("connecting");
+    setStatusDetail(relayUrl);
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      setStatus("error");
+      setStatusDetail("Microphone access denied");
+      return;
+    }
+
+    audioCtxRef.current = new AudioContext({ sampleRate: 24000 });
+
+    const ws = new WebSocket(relayUrl);
+    wsRef.current = ws;
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      setStatus("connected");
+      setStatusDetail(relayUrl);
+      reconnectAttemptRef.current = 0;
+
+      // ── Mic → relay pipeline ─────────────────────────────────────────────
+      const source = audioCtxRef.current!.createMediaStreamSource(stream);
+      const processor = audioCtxRef.current!.createScriptProcessor(4096, 1, 1);
+
+      processor.onaudioprocess = (e) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const float32 = e.inputBuffer.getChannelData(0);
+        // Convert Float32 → PCM16 little-endian
+        const pcm16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          pcm16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        }
+
+        // Base64-encode for the Realtime API input_audio_buffer.append event
+        const bytes = new Uint8Array(pcm16.buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const base64Audio = btoa(binary);
+
+        ws.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: base64Audio,
+          })
+        );
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtxRef.current!.destination);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+
+        switch (msg.type) {
+          case "response.audio.delta": {
+            // Decode base64 PCM16 and queue for playback
+            const binary = atob(msg.delta);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            playbackQueueRef.current.push(bytes.buffer);
+            playNextChunk();
+            break;
+          }
+          case "input_audio_buffer.speech_started": {
+            // User started speaking — cancel bot's current response
+            clearPlaybackQueue();
+            ws.send(JSON.stringify({ type: "response.cancel" }));
+            break;
+          }
+          case "error": {
+            console.error("[voice-agent] OpenAI error:", msg.error);
+            break;
+          }
+        }
+      } catch (err) {
+        console.error("[voice-agent] Failed to parse message:", err);
+      }
+    };
+
+    ws.onclose = (_event) => {
+      stream.getTracks().forEach((t) => t.stop());
+      audioCtxRef.current?.close();
+      clearPlaybackQueue();
+
+      if (!shouldReconnectRef.current) return;
+
+      setStatus("disconnected");
+      const delay = BACKOFF[Math.min(reconnectAttemptRef.current, BACKOFF.length - 1)];
+      setStatusDetail(`Reconnecting in ${delay / 1000}s... (attempt ${reconnectAttemptRef.current + 1})`);
+      reconnectAttemptRef.current++;
+
+      reconnectTimerRef.current = setTimeout(() => {
+        connect();
+      }, delay);
+    };
+
+    ws.onerror = () => {
+      setStatus("error");
+      setStatusDetail(`Failed to connect to: ${relayUrl}`);
+    };
+  }, [relayUrl, playNextChunk, clearPlaybackQueue]);
+
+  useEffect(() => {
+    shouldReconnectRef.current = true;
+    connect();
+
+    return () => {
+      shouldReconnectRef.current = false;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      wsRef.current?.close();
+    };
+  }, [connect]);
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  const dotClass = `status-dot ${status}`;
+  const labels: Record<ConnectionStatus, string> = {
+    idle: "Initializing...",
+    connecting: "Connecting to:",
+    connected: "Connected to:",
+    disconnected: "Reconnecting...",
+    error: "Error:",
+  };
 
   return (
     <div className="app-container">
       <div className="status-indicator">
-        <div
-          className={`status-dot ${
-            errorMessage ? "disconnected" : connectionStatus
-          }`}
-        />
+        <div className={dotClass} />
         <div className="status-text">
-          <div className="status-label">
-            {errorMessage
-              ? "Error:"
-              : connectionStatus === "connecting"
-              ? "Connecting to:"
-              : connectionStatus === "connected"
-              ? "Connected to:"
-              : "Failed to connect to:"}
-          </div>
-          <div className="status-url">{errorMessage || RELAY_SERVER_URL}</div>
+          <div className="status-label">{labels[status]}</div>
+          <div className="status-url">{statusDetail}</div>
         </div>
       </div>
     </div>
   );
 }
-
-export default App;
