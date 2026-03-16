@@ -7,6 +7,16 @@ import websockets
 from websockets.legacy.server import WebSocketServerProtocol, serve
 from websockets.legacy.client import connect
 
+# ─── Optional: KB dependencies ──────────────────────────────────────────────
+# pip install supabase openai httpx
+try:
+    from supabase import create_client as supabase_create_client
+    import openai
+
+    HAS_KB_DEPS = True
+except ImportError:
+    HAS_KB_DEPS = False
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -19,64 +29,222 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY must be set in .env file")
 
+# ─── Knowledge Base Config ───────────────────────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+KB_EMBEDDING_MODEL = os.getenv("KB_EMBEDDING_MODEL", "text-embedding-3-small")
+KB_MATCH_THRESHOLD = float(os.getenv("KB_MATCH_THRESHOLD", "0.5"))
+KB_MATCH_COUNT = int(os.getenv("KB_MATCH_COUNT", "5"))
 
-async def connect_to_openai():
-    """Connect to OpenAI's WebSocket endpoint."""
-    uri = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+KB_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and HAS_KB_DEPS)
+logger.info(f"Knowledge base: {'ENABLED' if KB_ENABLED else 'DISABLED'}")
+
+supabase = None
+openai_client = None
+if KB_ENABLED:
+    supabase = supabase_create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# ─── Tools Definition ────────────────────────────────────────────────────────
+TOOLS = [
+    {
+        "type": "function",
+        "name": "search_knowledge_base",
+        "description": (
+            "Şirket bilgi tabanında arama yapar. Şirket, ürünler, fiyatlandırma, "
+            "politikalar, müşteri bilgileri veya önceki toplantılar hakkında soru "
+            "sorulduğunda bu aracı kullan. Genel kültür veya gündelik sohbet soruları "
+            "için KULLANMA."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Aranacak sorgu metni. Kullanıcının sorusunun kısa ve net bir özeti.",
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["company_docs", "faq", "crm", "transcripts"],
+                    "description": "Opsiyonel kategori filtresi. Emin değilsen boş bırak.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+# Events we intercept (don't forward to client during tool calls)
+SUPPRESS_EVENTS = {
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
+}
+
+INSTRUCTIONS = """Sen Weya'sın — Light Eagle şirketinin AI toplantı asistanı. Türkçe konuş.
+
+KRİTİK KURALLAR:
+1. DİL: Varsayılan dilin Türkçe. İlk cümlenden itibaren Türkçe konuş. Sadece karşındaki İngilizce konuşursa İngilizce'ye geç. ASLA İspanyolca veya başka dil kullanma.
+2. BİLGİ TABANI: Şirket, kurucu, ekip, ürünler, hizmetler, fiyatlar, yatırımlar, müşteriler veya toplantı geçmişi hakkında bir soru sorulduğunda — ÖNCE search_knowledge_base aracını çağır, SONRA cevap ver. Aracı çağırmadan şirketle ilgili ASLA cevap verme. Bilgi tabanında sonuç yoksa "Bu konuda bilgi tabanımda kayıt bulamadım" de.
+3. KISA CEVAP: 2-3 cümle. Toplantı akışını bozma.
+4. KİMLİK: Yapay zeka olduğundan bahsetme, sorulmadıkça."""
+
+
+# ─── Knowledge Base Search ────────────────────────────────────────────────────
+async def search_knowledge_base(query: str, category: str | None = None) -> str:
+    """Search the KB via Supabase RPC and return formatted results."""
+    if not KB_ENABLED or not supabase or not openai_client:
+        return "Bilgi tabanı devre dışı."
 
     try:
-        ws = await connect(
-            uri,
-            extra_headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-                "OpenAI-Beta": "realtime=v1",
-            },
-            subprotocols=["realtime"],
+        # Create embedding
+        embed_response = openai_client.embeddings.create(
+            model=KB_EMBEDDING_MODEL,
+            input=query,
         )
-        logger.info("Successfully connected to OpenAI")
+        query_embedding = embed_response.data[0].embedding
 
-        response = await ws.recv()
-        try:
-            event = json.loads(response)
-            if event.get("type") != "session.created":
-                raise Exception(f"Expected session.created, got {event.get('type')}")
-            logger.info("Received session.created response")
+        # Search via Supabase RPC
+        result = supabase.rpc(
+            "search_knowledge_base",
+            {
+                "query_embedding": json.dumps(query_embedding),
+                "match_threshold": KB_MATCH_THRESHOLD,
+                "match_count": KB_MATCH_COUNT,
+                "filter_category": category,
+            },
+        ).execute()
 
-            update_session = {
-                "type": "session.update",
-                "session": {
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "modalities": ["text", "audio"],
-                    "voice": "alloy",
-                },
-            }
-            await ws.send(json.dumps(update_session))
-            logger.info("Sent session.create message")
+        data = result.data or []
+        logger.info(f'[kb] Search: query="{query}", results={len(data)}')
 
+        if not data:
             return (
-                ws,
-                event,
+                "Bilgi tabanında bu konuyla ilgili bir kayıt bulunamadı. "
+                "Kendi bilginle kısa ve dürüst bir cevap ver."
             )
-        except json.JSONDecodeError:
-            raise Exception(f"Invalid JSON response from OpenAI: {response}")
+
+        parts = []
+        for i, r in enumerate(data):
+            similarity_pct = round(r.get("similarity", 0) * 100)
+            title = r.get("document_title", "?")
+            cat_name = r.get("category_name", "?")
+            content = r.get("content", "")
+            parts.append(
+                f"[Kaynak {i + 1}: {title} ({cat_name}, benzerlik: {similarity_pct}%)]:\n{content}"
+            )
+        return "\n\n---\n\n".join(parts)
 
     except Exception as e:
-        logger.error(f"Failed to connect to OpenAI: {str(e)}")
-        raise
+        logger.error(f"[kb] Search error: {e}")
+        return "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver."
 
 
+# ─── Handle tool calls from OpenAI ───────────────────────────────────────────
+async def handle_tool_call(openai_ws, msg: dict):
+    """Process a completed function call and send the result back to OpenAI."""
+    call_id = msg.get("call_id")
+    name = msg.get("name")
+    raw_args = msg.get("arguments", "{}")
+
+    logger.info(f"[relay] Tool call: {name} — {raw_args}")
+
+    tool_result = f"Bilinmeyen araç: {name}"
+
+    if name == "search_knowledge_base":
+        try:
+            args = json.loads(raw_args)
+            tool_result = await search_knowledge_base(
+                args.get("query", ""),
+                args.get("category"),
+            )
+        except Exception as e:
+            logger.error(f"[relay] KB search error: {e}")
+            tool_result = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver."
+
+    # Send function_call_output back to OpenAI
+    await openai_ws.send(
+        json.dumps(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": tool_result,
+                },
+            }
+        )
+    )
+
+    # Trigger a new response
+    await openai_ws.send(json.dumps({"type": "response.create"}))
+    logger.info(f"[relay] Tool response sent for call_id={call_id}")
+
+
+# ─── OpenAI Connection ───────────────────────────────────────────────────────
+async def connect_to_openai():
+    """Connect to OpenAI's Realtime WebSocket endpoint."""
+    uri = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+
+    ws = await connect(
+        uri,
+        extra_headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+            "OpenAI-Beta": "realtime=v1",
+        },
+        subprotocols=["realtime"],
+    )
+    logger.info("Successfully connected to OpenAI")
+
+    response = await ws.recv()
+    event = json.loads(response)
+    if event.get("type") != "session.created":
+        raise Exception(f"Expected session.created, got {event.get('type')}")
+    logger.info("Received session.created response")
+
+    # ── Session update — THIS IS THE CRITICAL PART ──
+    session_config = {
+        "type": "session.update",
+        "session": {
+            "model": "gpt-4o-realtime-preview",
+            "modalities": ["text", "audio"],  # ← ZORUNLU — bu olmadan ses üretilmez
+            "voice": "shimmer",
+            "instructions": INSTRUCTIONS,
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 600,
+            },
+            "input_audio_transcription": {
+                "model": "whisper-1",
+            },
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+        },
+    }
+
+    # Add tools if KB is enabled
+    if KB_ENABLED:
+        session_config["session"]["tools"] = TOOLS
+
+    await ws.send(json.dumps(session_config))
+    logger.info(
+        f"Sent session.update {'(with KB tools)' if KB_ENABLED else '(no KB)'}"
+    )
+
+    return ws, event
+
+
+# ─── WebSocket Relay ──────────────────────────────────────────────────────────
 class WebSocketRelay:
     def __init__(self):
-        """Initialize the WebSocket relay server."""
-        self.connections = {}
-        self.message_queues = {}
+        self.connections: dict = {}
+        self.message_queues: dict = {}
 
     async def handle_browser_connection(
         self, websocket: WebSocketServerProtocol, path: str
     ):
-        """Handle a connection from the browser."""
         base_path = path.split("?")[0]
         if base_path != "/":
             logger.error(f"Invalid path: {path}")
@@ -88,15 +256,14 @@ class WebSocketRelay:
         openai_ws = None
 
         try:
-            # Connect to OpenAI
             openai_ws, session_created = await connect_to_openai()
             self.connections[websocket] = openai_ws
 
-            logger.info("Connected to OpenAI successfully!")
-
+            # Forward session.created to browser
             await websocket.send(json.dumps(session_created))
             logger.info("Forwarded session.created to browser")
 
+            # Drain queued messages
             while self.message_queues[websocket]:
                 message = self.message_queues[websocket].pop(0)
                 try:
@@ -118,25 +285,36 @@ class WebSocketRelay:
                             logger.error(f"Invalid JSON from browser: {message}")
                 except websockets.exceptions.ConnectionClosed as e:
                     logger.info(
-                        f"Browser connection closed normally: code={e.code}, reason={e.reason}"
+                        f"Browser connection closed: code={e.code}, reason={e.reason}"
                     )
                     raise
 
             async def handle_openai_messages():
                 try:
                     while True:
-                        message = await openai_ws.recv()
+                        raw = await openai_ws.recv()
                         try:
-                            event = json.loads(message)
-                            logger.info(
-                                f'Relaying "{event.get("type")}" from OpenAI: {message}'
-                            )
-                            await websocket.send(message)
+                            msg = json.loads(raw)
+                            msg_type = msg.get("type", "")
+
+                            # ── Intercept completed tool calls ──
+                            if msg_type == "response.function_call_arguments.done":
+                                await handle_tool_call(openai_ws, msg)
+                                continue  # Don't forward to client
+
+                            # ── Suppress noisy tool-call events ──
+                            if msg_type in SUPPRESS_EVENTS:
+                                continue
+
+                            # ── Forward everything else to browser ──
+                            if websocket.open:
+                                await websocket.send(raw)
+
                         except json.JSONDecodeError:
-                            logger.error(f"Invalid JSON from OpenAI: {message}")
+                            logger.error(f"Invalid JSON from OpenAI: {raw[:200]}")
                 except websockets.exceptions.ConnectionClosed as e:
                     logger.info(
-                        f"OpenAI connection closed normally: code={e.code}, reason={e.reason}"
+                        f"OpenAI connection closed: code={e.code}, reason={e.reason}"
                     )
                     raise
 
@@ -162,7 +340,6 @@ class WebSocketRelay:
                 await websocket.close(1000, "Normal closure")
 
     async def serve(self):
-        """Start the WebSocket relay server."""
         async with serve(
             self.handle_browser_connection,
             "0.0.0.0",
@@ -172,11 +349,11 @@ class WebSocketRelay:
             subprotocols=["realtime"],
         ):
             logger.info(f"WebSocket relay server started on ws://0.0.0.0:{PORT}")
+            logger.info(f"Knowledge base: {'ENABLED' if KB_ENABLED else 'DISABLED'}")
             await asyncio.Future()
 
 
 def main():
-    """Main entry point for the WebSocket relay server."""
     relay = WebSocketRelay()
     try:
         asyncio.run(relay.serve())
@@ -187,4 +364,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
