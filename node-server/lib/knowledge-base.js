@@ -13,7 +13,7 @@ export async function searchKnowledgeBase(query, category = null) {
 
   const { data, error } = await supabase.rpc("search_knowledge_base", {
     query_embedding: queryEmbedding,
-    match_threshold: 0.15,,
+    match_threshold: 0.15,
     match_count: parseInt(process.env.KB_MATCH_COUNT || "5"),
     filter_category: category,
   });
