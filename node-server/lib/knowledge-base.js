@@ -15,12 +15,21 @@ export async function searchKnowledgeBase(query, category = null) {
 
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
-  const { data, error } = await supabase.rpc("search_knowledge_base", {
+  const rpcParams = {
     query_embedding: embeddingStr,
     match_threshold: 0.0,
     match_count: 5,
-    filter_category: category,
-  });
+  };
+
+  // Sadece gerçek bir kategori değeri varsa gönder
+  if (category !== null && category !== undefined && category !== "") {
+    rpcParams.filter_category = category;
+  }
+
+  const { data, error } = await supabase.rpc(
+    "search_knowledge_base",
+    rpcParams
+  );
 
   const tSearch = Date.now();
   console.log(
