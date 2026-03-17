@@ -78,7 +78,8 @@ KRİTİK KURALLAR:
           silence_duration_ms: 600,
         },
         input_audio_transcription: {
-          model: "whisper-1",
+          model: "whisper-1"
+          language: "tr",
         },
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
