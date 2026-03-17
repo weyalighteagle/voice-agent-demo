@@ -96,7 +96,7 @@ wss.on("connection", (clientWs, req) => {
       type: "session.update",
       session: {
         model: OPENAI_MODEL,
-        voice: "ash",
+        voice: "coral",
         instructions: `# WEYA — Light Eagle Dijital Ekip Üyesi
  
 ## KİMLİĞİN
