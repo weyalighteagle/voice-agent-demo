@@ -11,8 +11,10 @@ export async function searchKnowledgeBase(query, category = null) {
   const queryEmbedding = await createEmbedding(query);
   const tEmbed = Date.now();
 
+  console.log(`[kb] Embedding: type=${typeof queryEmbedding}, length=${queryEmbedding?.length}, sample=[${queryEmbedding?.slice(0, 3).join(", ")}...]`);
+
   const { data, error } = await supabase.rpc("search_knowledge_base", {
-    query_embedding: queryEmbedding,
+    query_embedding: JSON.stringify(queryEmbedding),
     match_threshold: 0.15,
     match_count: parseInt(process.env.KB_MATCH_COUNT || "5"),
     filter_category: category,
