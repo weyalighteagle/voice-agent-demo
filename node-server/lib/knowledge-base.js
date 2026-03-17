@@ -11,17 +11,16 @@ export async function searchKnowledgeBase(query, category = null) {
   const queryEmbedding = await createEmbedding(query);
   const tEmbed = Date.now();
 
-  const embeddingStr = `[${queryEmbedding.join(",")}]`;
   console.log(`[kb] Embedding length=${queryEmbedding.length}`);
 
   const { data, error } = await supabase.rpc("search_knowledge_base", {
-    query_embedding: embeddingStr,
+    query_embedding: queryEmbedding,
     match_threshold: 0.0,
     match_count: 5,
     filter_category: category,
   });
-  const tSearch = Date.now();
 
+  const tSearch = Date.now();
   console.log(
     `[kb] Search: embed=${tEmbed - t0}ms, search=${tSearch - tEmbed}ms, total=${tSearch - t0}ms, results=${data?.length ?? 0}, error=${error ? JSON.stringify(error) : "none"}`
   );
@@ -30,6 +29,7 @@ export async function searchKnowledgeBase(query, category = null) {
     console.error("[kb] Search error:", error);
     return [];
   }
+
   return data || [];
 }
 
