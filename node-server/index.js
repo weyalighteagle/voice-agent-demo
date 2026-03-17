@@ -17,7 +17,16 @@ if (!OPENAI_API_KEY) {
 }
 
 const KB_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
-console.log(`[relay] Knowledge base: ${KB_ENABLED ? "ENABLED" : "DISABLED"}`);
+if (KB_ENABLED) {
+  console.log("[relay] Knowledge base: ENABLED");
+} else {
+  const missing = [
+    !process.env.SUPABASE_URL && "SUPABASE_URL",
+    !process.env.SUPABASE_SERVICE_KEY && "SUPABASE_SERVICE_KEY",
+  ].filter(Boolean);
+  console.warn(`[relay] Knowledge base: DISABLED — missing env vars: ${missing.join(", ")}`);
+  console.warn("[relay] Set these in the Railway service Variables tab to enable KB search.");
+}
 
 const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.delta",
@@ -78,7 +87,7 @@ KRİTİK KURALLAR:
           silence_duration_ms: 600,
         },
         input_audio_transcription: {
-          model: "whisper-1"
+          model: "whisper-1",
           language: "tr",
         },
         input_audio_format: "pcm16",

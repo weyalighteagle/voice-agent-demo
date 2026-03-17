@@ -7,7 +7,7 @@ export async function searchKnowledgeBase(query, category = null) {
   const tEmbed = Date.now();
 
   const { data, error } = await supabase.rpc("search_knowledge_base", {
-    query_embedding: JSON.stringify(queryEmbedding),
+    query_embedding: queryEmbedding,
     match_threshold: parseFloat(process.env.KB_MATCH_THRESHOLD || "0.5"),
     match_count: parseInt(process.env.KB_MATCH_COUNT || "5"),
     filter_category: category,
