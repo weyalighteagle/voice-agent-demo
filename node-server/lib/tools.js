@@ -16,10 +16,10 @@ export const TOOLS = [
           type: "string",
           enum: ["company_docs", "faq", "crm", "transcripts"],
           description:
-            "Opsiyonel kategori filtresi. Emin değilsen boş bırak.",
+            "Arama yapılacak kategori. ZORUNLUDUR, boş bırakma. Seçim rehberi: 'company_docs' → şirket dökümanları, politikalar, süreçler, genel şirket bilgisi; 'faq' → sık sorulan sorular, fiyatlandırma, ürün/hizmet detayları; 'crm' → müşteri bilgileri, müşteri geçmişi, ilişki yönetimi; 'transcripts' → geçmiş toplantılar, önceki görüşmeler, konuşma kayıtları. Emin değilsen 'company_docs' seç.",
         },
       },
-      required: ["query"],
+      required: ["query", "category"],
     },
   },
 ];
