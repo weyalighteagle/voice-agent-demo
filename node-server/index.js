@@ -187,4 +187,11 @@ KRİTİK KURALLAR:
 httpServer.listen(PORT, () => {
   console.log(`[relay] Server listening on port ${PORT}`);
   console.log(`[relay] Knowledge base: ${KB_ENABLED ? "ENABLED" : "DISABLED"}`);
+  console.log("[relay] Startup diagnostics:", {
+    PORT: process.env.PORT,
+    SUPABASE_URL: process.env.SUPABASE_URL ? "set" : "MISSING",
+    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
+    KB_ENABLED,
+  });
 });

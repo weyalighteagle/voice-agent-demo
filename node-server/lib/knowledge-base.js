@@ -2,6 +2,11 @@ import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
 export async function searchKnowledgeBase(query, category = null) {
+  if (!supabase) {
+    console.warn("[kb] Supabase client not initialized");
+    return [];
+  }
+
   const t0 = Date.now();
   const queryEmbedding = await createEmbedding(query);
   const tEmbed = Date.now();
