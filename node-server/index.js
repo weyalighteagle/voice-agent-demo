@@ -95,6 +95,7 @@ KRİTİK KURALLAR:
       },
     };
 
+    console.log("[relay] Sending session.update:", JSON.stringify(sessionUpdate, null, 2));
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log("[relay] Sent session.update", KB_ENABLED ? "(with KB tools)" : "(no KB)");
 
@@ -108,6 +109,16 @@ KRİTİK KURALLAR:
 
     try {
       const msg = JSON.parse(raw);
+
+      if (msg.type === "error") {
+        console.error("[relay] OpenAI ERROR:", JSON.stringify(msg, null, 2));
+      }
+      if (msg.type === "session.created") {
+        console.log("[relay] Session created:", msg.session?.id);
+      }
+      if (msg.type === "session.updated") {
+        console.log("[relay] Session updated successfully");
+      }
 
       if (msg.type === "response.function_call_arguments.done") {
         const { call_id, name, arguments: rawArgs } = msg;
@@ -156,7 +167,7 @@ KRİTİK KURALLAR:
   });
 
   openaiWs.on("close", (code, reason) => {
-    console.log(`[relay] OpenAI connection closed: ${code} ${reason}`);
+    console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
     clientWs.close();
   });
 
