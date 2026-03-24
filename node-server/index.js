@@ -12,21 +12,15 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const PORT = process.env.PORT ?? 3000;
 
-// ┌─────────────────────────────────────────────────────────────────────────────┐
-// │  MODEL: gpt-4o-realtime-preview-2025-06-03                                 │
-// │  En güncel preview snapshot — gpt-realtime GA modeline geçmek için         │
-// │  client tarafında da event isim değişiklikleri gerektiğinden (örn.         │
-// │  response.audio.delta → response.output_audio.delta), şu anda beta        │
-// │  arayüzünde kalıp en yeni preview snapshot'ı kullanıyoruz.                │
-// │                                                                             │
-// │  GA'ya geçiş yapılacaksa:                                                  │
-// │  1. OpenAI-Beta header'ını kaldır                                          │
-// │  2. session.type: "realtime" ekle                                          │
-// │  3. audio format yapısını değiştir (audio.input.format: {type, rate})      │
-// │  4. Client event isimlerini güncelle                                        │
-// │  5. Model string'ini "gpt-realtime" yap                                    │
-// └─────────────────────────────────────────────────────────────────────────────┘
-const OPENAI_MODEL = "gpt-4o-realtime-preview-2025-06-03";
+// ── MODEL: gpt-realtime-2025-08-28 (GA) ──────────────────────────────────────
+// GA interface kullanılıyor:
+// - OpenAI-Beta header yok
+// - session.type: "realtime" zorunlu
+// - ses/format/vad konfigürasyonu session.audio altında
+// - voice: session.audio.output.voice
+// - turn_detection: session.audio.input.turn_detection
+// ─────────────────────────────────────────────────────────────────────────────
+const OPENAI_MODEL = "gpt-realtime-2025-08-28";
 const OPENAI_REALTIME_URL = `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`;
 
 if (!OPENAI_API_KEY) {
@@ -81,11 +75,10 @@ wss.on("connection", (clientWs, req) => {
 
   console.log("[relay] Client connected — opening OpenAI Realtime connection");
 
-  // Beta header ile bağlanıyoruz — client uyumluluğu için
+  // GA interface kullanılıyor — header yok
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "OpenAI-Beta": "realtime=v1",
     },
   });
 
@@ -158,44 +151,52 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     if (apiConfig) {
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
-      voice = apiConfig.voice || "coral";
+      voice = apiConfig.voice || "cedar";
       language = apiConfig.language || "tr";
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
       console.log("[relay] Using config from: hardcoded fallback");
       instructions = HARDCODED_INSTRUCTIONS;
-      voice = "coral";
+      voice = "cedar";
       language = "tr";
     }
 
     const sessionUpdate = {
       type: "session.update",
       session: {
+        type: "realtime",
         model: OPENAI_MODEL,
-        voice,
         instructions,
 
         // ── Tools: KB devre dışıysa tool tanımlama ───────────────────────────
         ...(KB_ENABLED ? { tools: TOOLS } : {}),
 
-        // ── Semantic VAD: toplantıda insanları kesmemesi için ─────────────────
-        // server_vad yerine semantic_vad kullanıyoruz — kullanıcının cümlesini
-        // bitirip bitirmediğini anlamsal olarak algılıyor, düşünme
-        // duraklamalarında erken yanıt vermiyor.
-        turn_detection: {
-          type: "semantic_vad",
-          eagerness: "low",
+        // ── Audio & VAD ──────────────────────────────────────────────────────
+        audio: {
+          input: {
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
+            transcription: {
+              model: "gpt-4o-mini-transcribe",
+              language,
+            },
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 600,
+            },
+          },
+          output: {
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
+            voice,
+          },
         },
-
-        // ── Transcription: whisper-1 yerine daha doğru model ─────────────────
-        input_audio_transcription: {
-          model: "gpt-4o-mini-transcribe",
-          language,
-        },
-
-        // ── Audio format ─────────────────────────────────────────────────────
-        input_audio_format: "pcm16",
-        output_audio_format: "pcm16",
       },
     };
 
@@ -224,7 +225,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log("[relay] Session created:", msg.session?.id);
       }
       if (msg.type === "session.updated") {
-        console.log("[relay] Session updated — voice:", msg.session?.voice, "| turn_detection:", msg.session?.turn_detection?.type);
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
       }
 
       // ── Tool call handling ───────────────────────────────────────────────

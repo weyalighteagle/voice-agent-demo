@@ -17,6 +17,8 @@ export default function App() {
   // Queue of PCM16 chunks to play sequentially
   const playbackQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
+  const isRespondingRef = useRef(false);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const params = new URLSearchParams(window.location.search);
   const relayUrl = params.get("wss");
@@ -47,15 +49,21 @@ export default function App() {
     source.buffer = audioBuffer;
     source.connect(audioCtxRef.current.destination);
     source.onended = () => {
+      currentSourceRef.current = null;
       isPlayingRef.current = false;
       playNextChunk();
     };
     source.start();
+    currentSourceRef.current = source;
   }, []);
 
   const clearPlaybackQueue = useCallback(() => {
     playbackQueueRef.current = [];
     isPlayingRef.current = false;
+    try {
+      currentSourceRef.current?.stop();
+    } catch (_) {}
+    currentSourceRef.current = null;
   }, []);
 
   // ── WebSocket + microphone ────────────────────────────────────────────────
@@ -91,7 +99,7 @@ export default function App() {
 
       // ── Mic → relay pipeline ─────────────────────────────────────────────
       const source = audioCtxRef.current!.createMediaStreamSource(stream);
-      const processor = audioCtxRef.current!.createScriptProcessor(4096, 1, 1);
+      const processor = audioCtxRef.current!.createScriptProcessor(2048, 1, 1);
 
       processor.onaudioprocess = (e) => {
         if (ws.readyState !== WebSocket.OPEN) return;
@@ -128,6 +136,15 @@ export default function App() {
         const msg = JSON.parse(event.data as string);
 
         switch (msg.type) {
+          case "response.created": {
+            isRespondingRef.current = true;
+            break;
+          }
+          case "response.done": {
+            isRespondingRef.current = false;
+            break;
+          }
+          case "response.output_audio.delta":
           case "response.audio.delta": {
             // Decode base64 PCM16 and queue for playback
             const binary = atob(msg.delta);
@@ -142,7 +159,10 @@ export default function App() {
           case "input_audio_buffer.speech_started": {
             // User started speaking — cancel bot's current response
             clearPlaybackQueue();
-            ws.send(JSON.stringify({ type: "response.cancel" }));
+            if (isRespondingRef.current) {
+              isRespondingRef.current = false;
+              ws.send(JSON.stringify({ type: "response.cancel" }));
+            }
             break;
           }
           case "error": {
