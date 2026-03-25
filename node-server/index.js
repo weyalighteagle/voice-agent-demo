@@ -201,6 +201,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             transcription: {
               model: "gpt-4o-mini-transcribe",
               language,
+              prompt: language === "tr"
+                ? "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et."
+                : language === "en"
+                ? "This is an English meeting recording. Transcribe only in English."
+                : "",
             },
             turn_detection: {
               type: "server_vad",
