@@ -29,6 +29,31 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// ── Transcription prompt builder ──────────────────────────────────────────────
+function buildTranscriptionPrompt(language, wakeWord) {
+  const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
+
+  if (language === "tr") {
+    let prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
+    prompt += ` Özel isimler: ${properNouns}.`;
+    if (wakeWord) {
+      prompt += ` "${wakeWord}" bir tetikleme kelimesidir, bu kelimeyi duyduğunda tam olarak "${wakeWord}" yaz.`;
+    }
+    return prompt;
+  }
+
+  if (language === "en") {
+    let prompt = "This is an English meeting recording. Transcribe only in English.";
+    prompt += ` Proper nouns: ${properNouns}.`;
+    if (wakeWord) {
+      prompt += ` "${wakeWord}" is a trigger phrase, always transcribe it exactly as "${wakeWord}".`;
+    }
+    return prompt;
+  }
+
+  return wakeWord ? `Trigger word: "${wakeWord}".` : "";
+}
+
 // ── Knowledge Base (şu an devre dışı) ─────────────────────────────────────────
 const KB_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 if (KB_ENABLED) {
@@ -201,11 +226,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             transcription: {
               model: "gpt-4o-mini-transcribe",
               language,
-              prompt: language === "tr"
-                ? "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et."
-                : language === "en"
-                ? "This is an English meeting recording. Transcribe only in English."
-                : "",
+              prompt: buildTranscriptionPrompt(language, wakeWord),
             },
             turn_detection: {
               type: "server_vad",
