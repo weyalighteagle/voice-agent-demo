@@ -234,7 +234,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           input: {
             format: { type: "audio/pcm", rate: 24000 },
             transcription: {
-              model: "gpt-4o-mini-transcribe",
+              model: "gpt-4o-mini-transcribe-2025-12-15",
               language,
               prompt: transcriptionPrompt,
             },
