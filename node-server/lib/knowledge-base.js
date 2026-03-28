@@ -17,7 +17,7 @@ export async function searchKnowledgeBase(query, category = null, dateFrom = nul
 
   const rpcParams = {
     query_embedding: embeddingStr,
-    match_threshold: 0.0,
+    match_threshold: 0.35,
     match_count: 5,
   };
 
