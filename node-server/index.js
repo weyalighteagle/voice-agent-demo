@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { TOOLS } from "./lib/tools.js";
 import { searchKnowledgeBase, formatKBResults } from "./lib/knowledge-base.js";
 import { fetchVoiceAgentConfig } from "./lib/fetch-config.js";
-import { containsWakeWord } from "./lib/wake-word.js";
+import { containsWakeWord } from "./lib/wake-word.js";            // ▸ WAKE WORD — import
 
 dotenv.config();
 
@@ -13,23 +13,20 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const PORT = process.env.PORT ?? 3000;
 
+// ── MODEL: gpt-realtime-2025-08-28 (GA) ──────────────────────────────────────
+// GA interface kullanılıyor:
+// - OpenAI-Beta header yok
+// - session.type: "realtime" zorunlu
+// - ses/format/vad konfigürasyonu session.audio altında
+// - voice: session.audio.output.voice
+// - turn_detection: session.audio.input.turn_detection
+// ─────────────────────────────────────────────────────────────────────────────
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
 const OPENAI_REALTIME_URL = `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`;
 
 if (!OPENAI_API_KEY) {
-  process.stderr.write("[relay] OPENAI_API_KEY is required\n");
+  console.error("[relay] OPENAI_API_KEY is required");
   process.exit(1);
-}
-
-// ── Connection counter ────────────────────────────────────────────────────────
-let connectionCounter = 0;
-
-// ── Logger — process.stdout.write ile anında flush ────────────────────────────
-function log(msg) {
-  process.stdout.write(msg + "\n");
-}
-function logErr(msg) {
-  process.stderr.write(msg + "\n");
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
@@ -57,35 +54,32 @@ function buildTranscriptionPrompt(language, wakeWord) {
   return wakeWord ? `Trigger word: "${wakeWord}".` : "";
 }
 
-// ── Knowledge Base ─────────────────────────────────────────────────────────────
+// ── Knowledge Base (şu an devre dışı) ─────────────────────────────────────────
 const KB_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 if (KB_ENABLED) {
-  log("[relay] Knowledge base: ENABLED");
+  console.log("[relay] Knowledge base: ENABLED");
 } else {
   const missing = [
     !process.env.SUPABASE_URL && "SUPABASE_URL",
     !process.env.SUPABASE_SERVICE_KEY && "SUPABASE_SERVICE_KEY",
   ].filter(Boolean);
-  log("[relay] Knowledge base: DISABLED — missing: " + missing.join(", "));
+  console.warn(`[relay] Knowledge base: DISABLED — missing env vars: ${missing.join(", ")}`);
 }
 
-// ── Suppress from client relay only ──────────────────────────────────────────
+// ── Suppress noisy function-call streaming events ─────────────────────────────
 const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.delta",
   "response.function_call_arguments.done",
 ]);
 
-// ── HTTP server ───────────────────────────────────────────────────────────────
+// ── HTTP health endpoint ──────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
-  log("[http] " + req.method + " " + req.url);
-
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       status: "ok",
       model: OPENAI_MODEL,
       kb: KB_ENABLED,
-      activeConnections: wss.clients.size,
       timestamp: Date.now(),
     }));
     return;
@@ -98,44 +92,35 @@ const httpServer = createServer((req, res) => {
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (clientWs, req) => {
-  const connId = ++connectionCounter;
-  const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  const url = new URL(req.url ?? "/", "https://localhost");
-  const T = "[c" + connId + "]";
-
-  log(T + " NEW_CONN ip=" + clientIp + " path=" + url.pathname + " total=" + wss.clients.size);
-
+  const url = new URL(req.url ?? "/", `https://localhost`);
   if (url.pathname !== "/") {
-    log(T + " REJECTED bad path");
+    console.log(`[relay] Rejected connection to unknown path: ${url.pathname}`);
     clientWs.close();
     return;
   }
 
+  console.log("[relay] Client connected — opening OpenAI Realtime connection");
+
+  // GA interface kullanılıyor — header yok
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-    headers: { Authorization: "Bearer " + OPENAI_API_KEY },
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
   });
 
   const messageQueue = [];
-  let wakeWord = null;
-  let wakeWordEnabled = false;
-  let isAwake = false;
-  let pendingManualResponse = false;
-  let transcriptionPrompt = "";
 
-  let clientMsgCount = 0;
-  let openaiMsgCount = 0;
-  let audioIn = 0;
-  let audioOut = 0;
-  let respCreated = 0;
-  let respDone = 0;
-  let respCancelled = 0;
-  let toolCalls = 0;
-  let transcripts = 0;
-  let wakeTriggers = 0;
+  // ▸ WAKE WORD — per-connection state (set inside openaiWs.on("open"))
+  let wakeWord = null;           // the configured wake word string (null = disabled)
+  let wakeWordEnabled = false;   // shorthand for !!wakeWord
+  let isAwake = false;           // true after wake word detected, reset after response completes
+  let pendingManualResponse = false; // true after we manually send response.create
+  let transcriptionPrompt = "";  // cached prompt to detect hallucinations
 
   openaiWs.on("open", async () => {
-    log(T + " OPENAI_WS_OPEN");
+    console.log("[relay] Connected to OpenAI Realtime API");
 
+    // ── Hardcoded fallback prompt ─────────────────────────────────────────────
     const HARDCODED_INSTRUCTIONS = `# WEYA — Light Eagle Dijital Ekip Üyesi
 
 ## KİMLİĞİN
@@ -192,34 +177,37 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 - Bilgi tabanı şu an devre dışı olabilir — bu durumda kendi bilginle en iyi cevabı ver
 - Sonuç yoksa veya emin değilsen "Bu konuda kesin bilgim yok, kontrol etmem gerekir" de, uydurma`;
 
-    log(T + " Fetching config...");
-    const t0 = Date.now();
+    // ── Fetch config from main backend API ───────────────────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
-    log(T + " Config fetch: " + (Date.now() - t0) + "ms result=" + (apiConfig ? "OK" : "FAILED"));
 
     let instructions, voice, language;
     if (apiConfig) {
+      console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
       language = apiConfig.language || "tr";
-      wakeWord = apiConfig.wake_word || null;
-      log(T + " Config: voice=" + voice + " lang=" + language + " wake=" + wakeWord + " prompt_len=" + instructions.length);
+      wakeWord = apiConfig.wake_word || null;                      // ▸ WAKE WORD — read from config
     } else {
+      console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
+      console.log("[relay] Using config from: hardcoded fallback");
       instructions = HARDCODED_INSTRUCTIONS;
       voice = "cedar";
       language = "tr";
       wakeWord = null;
-      log(T + " Using hardcoded fallback");
     }
 
+    // ▸ WAKE WORD — initialise per-connection state
     wakeWordEnabled = !!wakeWord;
     isAwake = false;
     pendingManualResponse = false;
+    console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
+    // ▸ WAKE WORD — inject wake word rule into system prompt
     if (wakeWordEnabled) {
-      instructions += '\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "' + wakeWord + '" dediğinde cevap ver. "' + wakeWord + '" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "' + wakeWord + '" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.';
+      instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
     }
 
+    // ▸ Cache transcription prompt for hallucination detection
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
     const sessionUpdate = {
@@ -228,10 +216,17 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         type: "realtime",
         model: OPENAI_MODEL,
         instructions,
+
+        // ── Tools: KB devre dışıysa tool tanımlama ───────────────────────────
         ...(KB_ENABLED ? { tools: TOOLS } : {}),
+
+        // ── Audio & VAD ──────────────────────────────────────────────────────
         audio: {
           input: {
-            format: { type: "audio/pcm", rate: 24000 },
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
             transcription: {
               model: "gpt-4o-mini-transcribe",
               language,
@@ -245,289 +240,222 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             },
           },
           output: {
-            format: { type: "audio/pcm", rate: 24000 },
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
             voice,
           },
         },
       },
     };
 
+    console.log("[relay] Sending session.update:", JSON.stringify(sessionUpdate, null, 2));
     openaiWs.send(JSON.stringify(sessionUpdate));
-    log(T + " session.update SENT model=" + OPENAI_MODEL + " KB=" + KB_ENABLED);
+    console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
 
-    if (messageQueue.length > 0) {
-      log(T + " Flushing " + messageQueue.length + " queued msgs");
-      while (messageQueue.length > 0) openaiWs.send(messageQueue.shift());
+    // Flush queued messages
+    while (messageQueue.length > 0) {
+      openaiWs.send(messageQueue.shift());
     }
   });
 
-  // ── OpenAI → Client ────────────────────────────────────────────────────────
+  // ── OpenAI → Client message relay ──────────────────────────────────────────
   openaiWs.on("message", async (data) => {
-    openaiMsgCount++;
     const raw = data.toString();
 
     try {
       const msg = JSON.parse(raw);
-      const t = msg.type || "unknown";
 
-      switch (t) {
-        case "error":
-          logErr(T + " OAI_ERROR: " + JSON.stringify(msg));
-          break;
+      // Diagnostics
+      if (msg.type === "error") {
+        console.error("[relay] OpenAI ERROR:", JSON.stringify(msg, null, 2));
+      }
+      if (msg.type === "session.created") {
+        console.log("[relay] Session created:", msg.session?.id);
+      }
+      if (msg.type === "session.updated") {
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+      }
 
-        case "session.created":
-          log(T + " SESSION_CREATED id=" + (msg.session?.id || "-"));
-          break;
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — transcript check
+      // ════════════════════════════════════════════════════════════════════════
+      if (msg.type === "conversation.item.input_audio_transcription.completed") {
+        const transcript = msg.transcript || "";
+        console.log(`[relay] Transcript: "${transcript}"`);
 
-        case "session.updated":
-          log(T + " SESSION_UPDATED voice=" + (msg.session?.audio?.output?.voice || "-") + " vad=" + (msg.session?.audio?.input?.turn_detection?.type || "-"));
-          break;
-
-        case "input_audio_buffer.speech_started":
-          log(T + " SPEECH_START");
-          break;
-
-        case "input_audio_buffer.speech_stopped":
-          log(T + " SPEECH_STOP");
-          break;
-
-        case "input_audio_buffer.committed":
-          log(T + " AUDIO_COMMITTED item=" + (msg.item_id || "-"));
-          break;
-
-        case "conversation.item.created":
-          log(T + " ITEM_CREATED id=" + (msg.item?.id || "-") + " type=" + (msg.item?.type || "-") + " role=" + (msg.item?.role || "-"));
-          break;
-
-        case "conversation.item.input_audio_transcription.completed": {
-          transcripts++;
-          const transcript = msg.transcript || "";
-          log(T + " TRANSCRIPT #" + transcripts + ': "' + transcript + '"');
-
-          if (transcriptionPrompt && transcript.length > 40) {
-            const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
-            const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
-            const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
-            const matchCount = promptWords.filter(w => normT.includes(w)).length;
-            const ratio = promptWords.length > 0 ? matchCount / promptWords.length : 0;
-            if (ratio > 0.5) {
-              log(T + " HALLUCINATION " + matchCount + "/" + promptWords.length + " skip wake");
-              if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
-              return;
+        // ▸ Hallucination guard: transcription model sometimes outputs the
+        //   prompt text itself as a transcript (especially during silence).
+        //   This contains the wake word and causes false triggers.
+        //   Detect by checking if the transcript is suspiciously similar to
+        //   the transcription prompt we sent.
+        if (transcriptionPrompt && transcript.length > 40) {
+          const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
+          const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
+          // If >50% of the prompt appears in the transcript, it's hallucinated
+          const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
+          const matchCount = promptWords.filter(w => normT.includes(w)).length;
+          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
+            console.log(`[relay] Ignoring hallucinated prompt transcript (${matchCount}/${promptWords.length} prompt words matched)`);
+            // Still forward the event to client but skip wake word check
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(raw);
             }
-          }
-
-          if (wakeWordEnabled && !isAwake && containsWakeWord(transcript, wakeWord)) {
-            wakeTriggers++;
-            log(T + " WAKE_DETECTED #" + wakeTriggers);
-            isAwake = true;
-            pendingManualResponse = true;
-            openaiWs.send(JSON.stringify({ type: "response.create" }));
-          }
-          break;
-        }
-
-        case "conversation.item.input_audio_transcription.failed":
-          log(T + " TRANSCRIPT_FAIL: " + JSON.stringify(msg.error || {}));
-          break;
-
-        case "response.created":
-          respCreated++;
-          log(T + " RESP_CREATED #" + respCreated + " id=" + (msg.response?.id || "-") + " awake=" + isAwake + " pending=" + pendingManualResponse);
-          if (wakeWordEnabled && !isAwake && !pendingManualResponse) {
-            respCancelled++;
-            log(T + " RESP_CANCEL (sleeping) #" + respCancelled);
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
             return;
           }
-          if (pendingManualResponse) pendingManualResponse = false;
-          break;
-
-        case "response.output_item.added":
-          log(T + " OUT_ITEM_ADD type=" + (msg.item?.type || "-"));
-          break;
-
-        case "response.output_item.done":
-          log(T + " OUT_ITEM_DONE type=" + (msg.item?.type || "-"));
-          break;
-
-        case "response.content_part.added":
-          log(T + " CONTENT_PART_ADD type=" + (msg.part?.type || "-"));
-          break;
-
-        case "response.content_part.done":
-          log(T + " CONTENT_PART_DONE");
-          break;
-
-        case "response.audio_transcript.delta":
-          log(T + " TXT_DELTA: " + (msg.delta || "").substring(0, 60));
-          break;
-
-        case "response.audio_transcript.done":
-          log(T + " TXT_DONE: " + (msg.transcript || "").substring(0, 120));
-          break;
-
-        case "response.output_audio.delta":
-        case "response.audio.delta":
-          audioOut++;
-          if (audioOut <= 2 || audioOut % 200 === 0) {
-            log(T + " AUDIO_OUT #" + audioOut);
-          }
-          if (wakeWordEnabled && !isAwake) return;
-          break;
-
-        case "response.audio.done":
-        case "response.output_audio.done":
-          log(T + " AUDIO_OUT_DONE chunks=" + audioOut);
-          break;
-
-        case "response.done": {
-          respDone++;
-          const st = msg.response?.status ?? msg.status;
-          const u = msg.response?.usage;
-          log(T + " RESP_DONE #" + respDone + " status=" + st);
-          if (u) log(T + "   tokens in=" + (u.input_tokens || 0) + " out=" + (u.output_tokens || 0));
-          if (wakeWordEnabled && st === "completed") {
-            log(T + "   sleep");
-            isAwake = false;
-          }
-          break;
         }
 
-        case "rate_limits.updated":
-          log(T + " RATE_LIMITS " + JSON.stringify(msg.rate_limits || []));
-          break;
-
-        case "response.function_call_arguments.delta":
-          break;
-
-        case "response.function_call_arguments.done": {
-          toolCalls++;
-          const { call_id, name, arguments: rawArgs } = msg;
-          log(T + " TOOL #" + toolCalls + " " + name + " call=" + call_id + " args=" + rawArgs);
-
-          let toolResult;
-          if (name === "search_knowledge_base") {
-            if (!KB_ENABLED) {
-              toolResult = "Bilgi tabanı şu an devre dışı. Kendi bilginle en iyi cevabı ver.";
-              log(T + "   KB disabled");
-            } else {
-              try {
-                const args = JSON.parse(rawArgs);
-                const t0 = Date.now();
-                const results = await searchKnowledgeBase(args.query, args.category || null);
-                toolResult = formatKBResults(results);
-                log(T + "   KB: q=" + args.query + " results=" + results.length + " ms=" + (Date.now() - t0));
-              } catch (err) {
-                logErr(T + "   KB_ERR: " + err.message);
-                toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
-              }
-            }
-          } else {
-            toolResult = "Bilinmeyen araç: " + name;
-          }
-
-          openaiWs.send(JSON.stringify({
-            type: "conversation.item.create",
-            item: { type: "function_call_output", call_id, output: toolResult },
-          }));
+        if (wakeWordEnabled && !isAwake && containsWakeWord(transcript, wakeWord)) {
+          console.log(`[relay] ★ Wake word "${wakeWord}" detected — activating`);
           isAwake = true;
           pendingManualResponse = true;
           openaiWs.send(JSON.stringify({ type: "response.create" }));
-          log(T + "   tool_output sent + response.create");
-          return;
         }
-
-        default:
-          log(T + " EVT:" + t);
-          break;
+        // Don't return — still forward transcript event to client
       }
 
-      if (SUPPRESS_EVENTS.has(msg.type)) return;
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — gate response.created
+      // ════════════════════════════════════════════════════════════════════════
+      if (msg.type === "response.created") {
+        if (wakeWordEnabled && !isAwake && !pendingManualResponse) {
+          // Auto-generated response while sleeping — cancel silently
+          console.log("[relay] Response cancelled (wake word not detected)");
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          return; // don't forward to client
+        }
+        if (pendingManualResponse) {
+          pendingManualResponse = false;
+        }
+      }
 
-    } catch (e) {
-      log(T + " PARSE_ERR " + e.message);
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — reset on response completion
+      // ════════════════════════════════════════════════════════════════════════
+      if (msg.type === "response.done") {
+        const status = msg.response?.status ?? msg.status;
+        if (wakeWordEnabled && status === "completed") {
+          console.log("[relay] Response completed — going back to sleep");
+          isAwake = false;
+        }
+        // "cancelled" or "failed" → don't touch isAwake (may have been
+        // set by a concurrent wake word detection)
+      }
+
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — suppress audio deltas while sleeping
+      // ════════════════════════════════════════════════════════════════════════
+      if (wakeWordEnabled && !isAwake) {
+        if (
+          msg.type === "response.output_audio.delta" ||
+          msg.type === "response.audio.delta"
+        ) {
+          return; // don't forward audio to client
+        }
+      }
+
+      // ── Tool call handling ───────────────────────────────────────────────
+      if (msg.type === "response.function_call_arguments.done") {
+        const { call_id, name, arguments: rawArgs } = msg;
+        console.log(`[relay] Tool call: ${name}`, rawArgs);
+
+        let toolResult;
+
+        if (name === "search_knowledge_base") {
+          if (!KB_ENABLED) {
+            toolResult = "Bilgi tabanı şu an devre dışı. Kendi bilginle en iyi cevabı ver.";
+            console.log("[relay] KB search skipped — KB disabled");
+          } else {
+            try {
+              const args = JSON.parse(rawArgs);
+              const results = await searchKnowledgeBase(args.query, args.category || null);
+              toolResult = formatKBResults(results);
+              console.log(`[relay] KB search: query="${args.query}", results=${results.length}`);
+            } catch (err) {
+              console.error("[relay] KB search error:", err);
+              toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
+            }
+          }
+        } else {
+          toolResult = `Bilinmeyen araç: ${name}`;
+        }
+
+        // Send function output back
+        openaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id,
+            output: toolResult,
+          },
+        }));
+
+        // ▸ WAKE WORD — mark so the next response.created is let through
+        pendingManualResponse = true;
+
+        // Trigger response generation
+        openaiWs.send(JSON.stringify({ type: "response.create" }));
+        console.log(`[relay] Tool response sent for call_id=${call_id}`);
+        return;
+      }
+
+      // Suppress noisy events
+      if (SUPPRESS_EVENTS.has(msg.type)) {
+        return;
+      }
+    } catch {
+      // JSON parse hatası — olduğu gibi ilet
     }
 
+    // Forward everything else to client
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(raw);
     }
   });
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  // ── Connection lifecycle ───────────────────────────────────────────────────
   openaiWs.on("close", (code, reason) => {
-    log(T + " OAI_CLOSED code=" + code);
-    log(T + "   stats oai=" + openaiMsgCount + " cli=" + clientMsgCount + " aIn=" + audioIn + " aOut=" + audioOut + " resp=" + respCreated + "/" + respDone + "/" + respCancelled + " tools=" + toolCalls + " tr=" + transcripts + " wake=" + wakeTriggers);
+    console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
   openaiWs.on("error", (err) => {
-    logErr(T + " OAI_ERR: " + err.message);
+    console.error("[relay] OpenAI WebSocket error:", err.message);
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
   clientWs.on("message", (data) => {
-    clientMsgCount++;
-    const s = data.toString();
-
-    try {
-      const m = JSON.parse(s);
-      if (m.type === "input_audio_buffer.append") {
-        audioIn++;
-        if (audioIn <= 2 || audioIn % 500 === 0) {
-          log(T + " AUDIO_IN #" + audioIn);
-        }
-      } else {
-        log(T + " CLI:" + m.type);
-      }
-    } catch {
-      log(T + " CLI:raw " + s.length + "b");
-    }
-
     if (openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.send(s);
+      openaiWs.send(data.toString());
     } else {
-      messageQueue.push(s);
-      log(T + " QUEUED q=" + messageQueue.length);
+      messageQueue.push(data.toString());
     }
   });
 
-  clientWs.on("close", (code) => {
-    log(T + " CLI_CLOSED code=" + code);
-    log(T + "   final cli=" + clientMsgCount + " oai=" + openaiMsgCount + " aIn=" + audioIn + " aOut=" + audioOut + " resp=" + respCreated + "/" + respDone + "/" + respCancelled + " tools=" + toolCalls + " tr=" + transcripts + " wake=" + wakeTriggers);
+  clientWs.on("close", () => {
+    console.log("[relay] Client disconnected — closing OpenAI connection");
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 
   clientWs.on("error", (err) => {
-    logErr(T + " CLI_ERR: " + err.message);
+    console.error("[relay] Client WebSocket error:", err.message);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
-  log("========================================");
-  log("[relay] STARTED port=" + PORT);
-  log("[relay] model=" + OPENAI_MODEL);
-  log("[relay] KB=" + (KB_ENABLED ? "ON" : "OFF"));
-  log("[relay] node=" + process.version + " " + process.platform + "/" + process.arch);
-  log("[relay] env OPENAI=" + (process.env.OPENAI_API_KEY ? "set" : "MISSING") + " SUPABASE=" + (process.env.SUPABASE_URL ? "set" : "MISSING") + " BACKEND=" + (process.env.BACKEND_API_URL ? "set" : "MISSING"));
-  log("========================================");
-});
-
-process.on("uncaughtException", (err) => {
-  logErr("[relay] UNCAUGHT: " + err.message + "\n" + err.stack);
-});
-process.on("unhandledRejection", (reason) => {
-  logErr("[relay] UNHANDLED: " + reason);
-});
-process.on("SIGTERM", () => {
-  log("[relay] SIGTERM");
-  wss.clients.forEach((ws) => ws.close());
-  httpServer.close(() => process.exit(0));
-});
-process.on("SIGINT", () => {
-  log("[relay] SIGINT");
-  wss.clients.forEach((ws) => ws.close());
-  httpServer.close(() => process.exit(0));
+  console.log(`[relay] Server listening on port ${PORT}`);
+  console.log(`[relay] Model: ${OPENAI_MODEL}`);
+  console.log(`[relay] Knowledge base: ${KB_ENABLED ? "ENABLED" : "DISABLED"}`);
+  console.log("[relay] Startup diagnostics:", {
+    PORT,
+    MODEL: OPENAI_MODEL,
+    SUPABASE_URL: process.env.SUPABASE_URL ? "set" : "MISSING",
+    SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
+    BACKEND_API_URL: process.env.BACKEND_API_URL ? "set" : "MISSING",
+    KB_ENABLED,
+  });
 });
