@@ -115,6 +115,7 @@ wss.on("connection", (clientWs, req) => {
   let wakeWordEnabled = false;   // shorthand for !!wakeWord
   let isAwake = false;           // true after wake word detected, reset after response completes
   let pendingManualResponse = false; // true after we manually send response.create
+  let transcriptionPrompt = "";  // cached prompt to detect hallucinations
 
   openaiWs.on("open", async () => {
     console.log("[relay] Connected to OpenAI Realtime API");
@@ -206,6 +207,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
     }
 
+    // ▸ Cache transcription prompt for hallucination detection
+    transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
+
     const sessionUpdate = {
       type: "session.update",
       session: {
@@ -226,7 +230,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             transcription: {
               model: "gpt-4o-mini-transcribe",
               language,
-              prompt: buildTranscriptionPrompt(language, wakeWord),
+              prompt: transcriptionPrompt,
             },
             turn_detection: {
               type: "server_vad",
@@ -280,6 +284,27 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const transcript = msg.transcript || "";
         console.log(`[relay] Transcript: "${transcript}"`);
+
+        // ▸ Hallucination guard: transcription model sometimes outputs the
+        //   prompt text itself as a transcript (especially during silence).
+        //   This contains the wake word and causes false triggers.
+        //   Detect by checking if the transcript is suspiciously similar to
+        //   the transcription prompt we sent.
+        if (transcriptionPrompt && transcript.length > 40) {
+          const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
+          const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
+          // If >50% of the prompt appears in the transcript, it's hallucinated
+          const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
+          const matchCount = promptWords.filter(w => normT.includes(w)).length;
+          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
+            console.log(`[relay] Ignoring hallucinated prompt transcript (${matchCount}/${promptWords.length} prompt words matched)`);
+            // Still forward the event to client but skip wake word check
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(raw);
+            }
+            return;
+          }
+        }
 
         if (wakeWordEnabled && !isAwake && containsWakeWord(transcript, wakeWord)) {
           console.log(`[relay] ★ Wake word "${wakeWord}" detected — activating`);
