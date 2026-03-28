@@ -54,7 +54,7 @@ function buildTranscriptionPrompt(language, wakeWord) {
   return wakeWord ? `Trigger word: "${wakeWord}".` : "";
 }
 
-// ── Knowledge Base ────────────────────────────────────────────────────────────
+// ── Knowledge Base (şu an devre dışı) ─────────────────────────────────────────
 const KB_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 if (KB_ENABLED) {
   console.log("[relay] Knowledge base: ENABLED");
@@ -116,7 +116,6 @@ wss.on("connection", (clientWs, req) => {
   let isAwake = false;           // true after wake word detected, reset after response completes
   let pendingManualResponse = false; // true after we manually send response.create
   let transcriptionPrompt = "";  // cached prompt to detect hallucinations
-  let hasActiveResponse = false; // tracks whether there's an active response (to avoid cancel errors)
 
   openaiWs.on("open", async () => {
     console.log("[relay] Connected to OpenAI Realtime API");
@@ -201,7 +200,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     wakeWordEnabled = !!wakeWord;
     isAwake = false;
     pendingManualResponse = false;
-    hasActiveResponse = false;
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
     // ▸ WAKE WORD — inject wake word rule into system prompt
@@ -271,10 +269,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
       // Diagnostics
       if (msg.type === "error") {
-        // Suppress the noisy "response_cancel_not_active" errors
-        if (msg.error?.code === "response_cancel_not_active") {
-          return;
-        }
         console.error("[relay] OpenAI ERROR:", JSON.stringify(msg, null, 2));
       }
       if (msg.type === "session.created") {
@@ -325,14 +319,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       // ▸ WAKE WORD — gate response.created
       // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "response.created") {
-        hasActiveResponse = true;
-
         if (wakeWordEnabled && !isAwake && !pendingManualResponse) {
-          // Auto-generated response while sleeping — cancel only if active
-          if (hasActiveResponse) {
-            console.log("[relay] Response cancelled (wake word not detected)");
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          }
+          // Auto-generated response while sleeping — cancel silently
+          console.log("[relay] Response cancelled (wake word not detected)");
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return; // don't forward to client
         }
         if (pendingManualResponse) {
@@ -344,22 +334,13 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       // ▸ WAKE WORD — reset on response completion
       // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "response.done") {
-        hasActiveResponse = false;
         const status = msg.response?.status ?? msg.status;
-
-        if (wakeWordEnabled) {
-          if (status === "completed") {
-            // Only go back to sleep if this was a real completed response
-            // (not a cancelled one from the wake word gate)
-            console.log("[relay] Response completed — going back to sleep");
-            isAwake = false;
-          }
-          // "cancelled" → don't reset isAwake — this is likely our own
-          //   cancel from the wake word gate, or a cancel during tool calls.
-          //   If we reset here, the tool call response flow breaks because
-          //   the next response.created gets blocked.
-          // "failed" → also don't touch isAwake
+        if (wakeWordEnabled && status === "completed") {
+          console.log("[relay] Response completed — going back to sleep");
+          isAwake = false;
         }
+        // "cancelled" or "failed" → don't touch isAwake (may have been
+        // set by a concurrent wake word detection)
       }
 
       // ════════════════════════════════════════════════════════════════════════
@@ -410,8 +391,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           },
         }));
 
-        // ▸ WAKE WORD — keep awake through tool call flow and mark so
-        //   the next response.created is let through
+        // ▸ WAKE WORD — re-assert awake state so the follow-up response
+        //   after tool output is not blocked by the wake word gate.
+        //   Without this, the response.done from the tool-call response
+        //   sets isAwake=false before the actual answer response starts.
         isAwake = true;
         pendingManualResponse = true;
 
