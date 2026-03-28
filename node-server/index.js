@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { TOOLS } from "./lib/tools.js";
 import { searchKnowledgeBase, formatKBResults } from "./lib/knowledge-base.js";
 import { fetchVoiceAgentConfig } from "./lib/fetch-config.js";
-import { containsWakeWord } from "./lib/wake-word.js";
+import { containsWakeWord } from "./lib/wake-word.js";            // ▸ WAKE WORD — import
 
 dotenv.config();
 
@@ -13,6 +13,14 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const PORT = process.env.PORT ?? 3000;
 
+// ── MODEL: gpt-realtime-2025-08-28 (GA) ──────────────────────────────────────
+// GA interface kullanılıyor:
+// - OpenAI-Beta header yok
+// - session.type: "realtime" zorunlu
+// - ses/format/vad konfigürasyonu session.audio altında
+// - voice: session.audio.output.voice
+// - turn_detection: session.audio.input.turn_detection
+// ─────────────────────────────────────────────────────────────────────────────
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
 const OPENAI_REALTIME_URL = `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`;
 
@@ -46,7 +54,7 @@ function buildTranscriptionPrompt(language, wakeWord) {
   return wakeWord ? `Trigger word: "${wakeWord}".` : "";
 }
 
-// ── Knowledge Base ────────────────────────────────────────────────────────────
+// ── Knowledge Base (şu an devre dışı) ─────────────────────────────────────────
 const KB_ENABLED = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
 if (KB_ENABLED) {
   console.log("[relay] Knowledge base: ENABLED");
@@ -93,6 +101,7 @@ wss.on("connection", (clientWs, req) => {
 
   console.log("[relay] Client connected — opening OpenAI Realtime connection");
 
+  // GA interface kullanılıyor — header yok
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -101,25 +110,18 @@ wss.on("connection", (clientWs, req) => {
 
   const messageQueue = [];
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // ▸ WAKE WORD — per-connection state
-  // ══════════════════════════════════════════════════════════════════════════
-  let wakeWord = null;
-  let wakeWordEnabled = false;
-  let isAwake = false;              // true = wake word detected, bot may speak
-  let pendingManualResponse = false; // true = we sent response.create, next response.created is ours
-  let transcriptionPrompt = "";
-  let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
-  let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
-
-  // ▸ DEBUG — structured state logger
-  function logState(context) {
-    console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp}`);
-  }
+  // ▸ WAKE WORD — per-connection state (set inside openaiWs.on("open"))
+  let wakeWord = null;           // the configured wake word string (null = disabled)
+  let wakeWordEnabled = false;   // shorthand for !!wakeWord
+  let isAwake = false;           // true after wake word detected, reset after response completes
+  let pendingManualResponse = false; // true after we manually send response.create
+  let transcriptionPrompt = "";  // cached prompt to detect hallucinations
+  let primedUntil = 0;           // timestamp — wake word heard but no content yet, accept next turn
 
   openaiWs.on("open", async () => {
     console.log("[relay] Connected to OpenAI Realtime API");
 
+    // ── Hardcoded fallback prompt ─────────────────────────────────────────────
     const HARDCODED_INSTRUCTIONS = `# WEYA — Light Eagle Dijital Ekip Üyesi
 
 ## KİMLİĞİN
@@ -190,7 +192,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
       language = apiConfig.language || "tr";
-      wakeWord = apiConfig.wake_word || null;
+      wakeWord = apiConfig.wake_word || null;                      // ▸ WAKE WORD — read from config
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
       console.log("[relay] Using config from: hardcoded fallback");
@@ -200,18 +202,19 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       wakeWord = null;
     }
 
-    // ▸ Initialise state
+    // ▸ WAKE WORD — initialise per-connection state
     wakeWordEnabled = !!wakeWord;
     isAwake = false;
     pendingManualResponse = false;
-    activeResponseId = null;
-    awaitingToolFollowUp = false;
+    primedUntil = 0;
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
+    // ▸ WAKE WORD — inject wake word rule into system prompt
     if (wakeWordEnabled) {
       instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
     }
 
+    // ▸ Cache transcription prompt for hallucination detection
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
     const sessionUpdate = {
@@ -220,10 +223,17 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         type: "realtime",
         model: OPENAI_MODEL,
         instructions,
+
+        // ── Tools: KB devre dışıysa tool tanımlama ───────────────────────────
         ...(KB_ENABLED ? { tools: TOOLS } : {}),
+
+        // ── Audio & VAD ──────────────────────────────────────────────────────
         audio: {
           input: {
-            format: { type: "audio/pcm", rate: 24000 },
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
             transcription: {
               model: "gpt-4o-mini-transcribe",
               language,
@@ -237,7 +247,10 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
             },
           },
           output: {
-            format: { type: "audio/pcm", rate: 24000 },
+            format: {
+              type: "audio/pcm",
+              rate: 24000,
+            },
             voice,
           },
         },
@@ -248,187 +261,166 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
 
+    // Flush queued messages
     while (messageQueue.length > 0) {
       openaiWs.send(messageQueue.shift());
     }
   });
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // ── OpenAI → Client message relay
-  // ══════════════════════════════════════════════════════════════════════════
+  // ── OpenAI → Client message relay ──────────────────────────────────────────
   openaiWs.on("message", async (data) => {
     const raw = data.toString();
 
     try {
       const msg = JSON.parse(raw);
 
-      // ── Error handling — suppress cancel spam ───────────────────────────
+      // Diagnostics
       if (msg.type === "error") {
-        if (msg.error?.code === "response_cancel_not_active") {
-          // Harmless: we tried to cancel but there was nothing to cancel
-          return;
-        }
         console.error("[relay] OpenAI ERROR:", JSON.stringify(msg, null, 2));
       }
-
       if (msg.type === "session.created") {
         console.log("[relay] Session created:", msg.session?.id);
       }
       if (msg.type === "session.updated") {
-        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice,
-          "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
       }
 
-      // ════════════════════════════════════════════════════════════════════
-      // ▸ TRANSCRIPT — wake word detection + hallucination guards
-      // ════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — transcript check
+      // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const transcript = msg.transcript || "";
         console.log(`[relay] Transcript: "${transcript}"`);
-        logState("transcript");
 
-        // ── Guard 1: Short transcript = just wake word = likely hallucination
-        if (wakeWordEnabled && transcript.trim().length > 0 && transcript.trim().length < 15) {
-          if (containsWakeWord(transcript, wakeWord)) {
-            // Strip "hey", the wake word itself, and punctuation — is anything left?
-            const stripped = transcript.toLowerCase()
-              .replace(/hey/gi, "")
-              .replace(new RegExp(wakeWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "gi"), "")
-              .replace(/[.,!?\s]/g, "")
-              .trim();
-            if (stripped.length < 3) {
-              console.log(`[relay] HALLUCINATION BLOCKED — short wake-word-only transcript: "${transcript}"`);
-              if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
-              return;
-            }
-          }
-        }
-
-        // ── Guard 2: Prompt echo (ASR outputs its own prompt as transcript)
+        // ▸ Hallucination guard: transcription model sometimes outputs the
+        //   prompt text itself as a transcript (especially during silence).
+        //   This contains the wake word and causes false triggers.
+        //   Detect by checking if the transcript is suspiciously similar to
+        //   the transcription prompt we sent.
         if (transcriptionPrompt && transcript.length > 40) {
           const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
           const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
+          // If >50% of the prompt appears in the transcript, it's hallucinated
           const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
           const matchCount = promptWords.filter(w => normT.includes(w)).length;
           if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
-            console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
-            if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
+            console.log(`[relay] Ignoring hallucinated prompt transcript (${matchCount}/${promptWords.length} prompt words matched)`);
+            // Still forward the event to client but skip wake word check
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(raw);
+            }
             return;
           }
         }
 
-        // ── Wake word detection (only when sleeping)
         if (wakeWordEnabled && !isAwake) {
           if (containsWakeWord(transcript, wakeWord)) {
-            console.log(`[relay] ★ WAKE WORD DETECTED — activating for: "${transcript}"`);
-            isAwake = true;
-            pendingManualResponse = true;
-            logState("activated");
-            openaiWs.send(JSON.stringify({ type: "response.create" }));
+            // Check if there's meaningful content after the wake word
+            const normT = transcript.toLowerCase();
+            const normW = wakeWord.toLowerCase();
+            const wakeIdx = normT.indexOf(normW);
+            const afterWake = wakeIdx >= 0
+              ? normT.slice(wakeIdx + normW.length).replace(/[.,!?\s]/g, "").trim()
+              : "";
+
+            if (afterWake.length < 3) {
+              // Wake word without content — could be hallucination or "Hey Weya [pause] şunu yap"
+              // Prime for 7 seconds so the next turn is accepted without re-detecting wake word
+              console.log(`[relay] Wake word detected without content — priming for 7s`);
+              primedUntil = Date.now() + 7000;
+            } else {
+              // Wake word + meaningful content — activate immediately
+              console.log(`[relay] ★ Wake word "${wakeWord}" detected — activating`);
+              isAwake = true;
+              primedUntil = 0;
+              pendingManualResponse = true;
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
+          } else if (primedUntil > 0 && Date.now() < primedUntil) {
+            // No wake word in this transcript, but we're primed from a recent detection
+            // Activate if there's any meaningful speech content
+            const content = transcript.replace(/[.,!?\s]/g, "").trim();
+            if (content.length >= 3) {
+              console.log(`[relay] Primed state — activating on follow-up: "${transcript}"`);
+              isAwake = true;
+              primedUntil = 0;
+              pendingManualResponse = true;
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
           }
         }
-        // Always forward transcript to client
+        // Don't return — still forward transcript event to client
       }
 
-      // ════════════════════════════════════════════════════════════════════
-      // ▸ RESPONSE.CREATED — gate unwanted responses
-      // ════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — gate response.created
+      // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "response.created") {
-        const respId = msg.response?.id || "unknown";
-        console.log(`[relay] response.created id=${respId}`);
-        logState("resp.created");
-
-        if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — cancel
-          console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
-          activeResponseId = respId;
-          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          return;
+        if (wakeWordEnabled && !isAwake && !pendingManualResponse) {
+          // Check if we're in primed state (wake word heard recently, waiting for content)
+          if (primedUntil > 0 && Date.now() < primedUntil) {
+            console.log("[relay] Primed state — allowing auto-generated response");
+            isAwake = true;
+            primedUntil = 0;
+          } else {
+            // Auto-generated response while sleeping — cancel silently
+            console.log("[relay] Response cancelled (wake word not detected)");
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            return; // don't forward to client
+          }
         }
-
-        // Legitimate response — accept and track
-        activeResponseId = respId;
         if (pendingManualResponse) {
-          console.log(`[relay] Consuming pendingManualResponse for ${respId}`);
           pendingManualResponse = false;
         }
-        if (awaitingToolFollowUp) {
-          console.log(`[relay] Tool follow-up response accepted: ${respId}`);
-          // Don't clear awaitingToolFollowUp here — clear it when this response completes
-        }
-        logState("resp.created-OK");
       }
 
-      // ════════════════════════════════════════════════════════════════════
-      // ▸ RESPONSE.DONE — track completion, manage sleep state
-      // ════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — reset on response completion
+      // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "response.done") {
         const status = msg.response?.status ?? msg.status;
-        const respId = msg.response?.id || "unknown";
-        const output = msg.response?.output || [];
-        const outputTypes = output.map(item => item.type);
-
-        console.log(`[relay] response.done id=${respId} status=${status} outputs=[${outputTypes}]`);
-        logState("resp.done");
-
-        if (wakeWordEnabled) {
-          if (status === "completed") {
-            const hasToolCall = output.some(item => item.type === "function_call");
-
-            if (hasToolCall) {
-              // Tool call response completed — stay awake for the follow-up
-              awaitingToolFollowUp = true;
-              console.log(`[relay] TOOL CALL detected in response — awaitingToolFollowUp=true, staying awake`);
-            } else if (awaitingToolFollowUp) {
-              // This is the follow-up response after tool call — NOW go to sleep
-              awaitingToolFollowUp = false;
-              isAwake = false;
-              console.log(`[relay] TOOL FOLLOW-UP completed — going to sleep`);
-            } else {
-              // Normal response (no tool) — go to sleep
-              isAwake = false;
-              console.log(`[relay] NORMAL response completed — going to sleep`);
-            }
-          } else if (status === "cancelled") {
-            console.log(`[relay] Response ${respId} was cancelled`);
-            // Don't change isAwake — might have been user interruption
+        if (wakeWordEnabled && status === "completed") {
+          // If the response contained a tool call, stay awake — the follow-up
+          // response (with KB results) still needs to be delivered
+          const output = msg.response?.output || [];
+          const hasToolCall = output.some(item => item.type === "function_call");
+          if (hasToolCall) {
+            console.log("[relay] Response completed with tool call — staying awake for follow-up");
+          } else {
+            console.log("[relay] Response completed — going back to sleep");
+            isAwake = false;
           }
         }
-
-        activeResponseId = null;
-        logState("resp.done-final");
+        // "cancelled" or "failed" → don't touch isAwake (may have been
+        // set by a concurrent wake word detection)
       }
 
-      // ════════════════════════════════════════════════════════════════════
-      // ▸ AUDIO SUPPRESSION — don't forward audio while sleeping
-      // ════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // ▸ WAKE WORD — suppress audio deltas while sleeping
+      // ════════════════════════════════════════════════════════════════════════
       if (wakeWordEnabled && !isAwake) {
         if (
           msg.type === "response.output_audio.delta" ||
           msg.type === "response.audio.delta"
         ) {
-          return;
+          return; // don't forward audio to client
         }
       }
 
-      // ════════════════════════════════════════════════════════════════════
-      // ▸ TOOL CALL — KB search
-      // ════════════════════════════════════════════════════════════════════
+      // ── Tool call handling ───────────────────────────────────────────────
       if (msg.type === "response.function_call_arguments.done") {
         const { call_id, name, arguments: rawArgs } = msg;
-        console.log(`[relay] TOOL CALL: ${name} args=${rawArgs}`);
-        logState("tool-call");
+        console.log(`[relay] Tool call: ${name}`, rawArgs);
 
         let toolResult;
 
         if (name === "search_knowledge_base") {
           if (!KB_ENABLED) {
             toolResult = "Bilgi tabanı şu an devre dışı. Kendi bilginle en iyi cevabı ver.";
-            console.log("[relay] KB disabled — returning fallback message");
+            console.log("[relay] KB search skipped — KB disabled");
           } else {
             try {
               const args = JSON.parse(rawArgs);
-              console.log(`[relay] KB SEARCH: query="${args.query}" category="${args.category}" from="${args.date_from || "-"}" to="${args.date_to || "-"}"`);
               const results = await searchKnowledgeBase(
                 args.query,
                 args.category || null,
@@ -436,12 +428,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
                 args.date_to || null
               );
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB RESULTS: ${results.length} documents found`);
-              if (results.length > 0) {
-                results.forEach((r, i) => {
-                  console.log(`[relay]   [${i+1}] "${r.document_title}" (${r.category_name}) similarity=${(r.similarity * 100).toFixed(0)}%`);
-                });
-              }
+              console.log(`[relay] KB search: query="${args.query}", results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -451,7 +438,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           toolResult = `Bilinmeyen araç: ${name}`;
         }
 
-        // Send function output back to OpenAI
+        // Send function output back
         openaiWs.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
@@ -461,22 +448,21 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           },
         }));
 
-        // Mark next response.created as legitimate
+        // ▸ WAKE WORD — mark so the next response.created is let through
         pendingManualResponse = true;
 
-        // Trigger follow-up response
+        // Trigger response generation
         openaiWs.send(JSON.stringify({ type: "response.create" }));
-        console.log(`[relay] Tool output sent, response.create triggered for call_id=${call_id}`);
-        logState("tool-done");
+        console.log(`[relay] Tool response sent for call_id=${call_id}`);
         return;
       }
 
-      // Suppress noisy streaming events
+      // Suppress noisy events
       if (SUPPRESS_EVENTS.has(msg.type)) {
         return;
       }
     } catch {
-      // JSON parse error — forward as-is
+      // JSON parse hatası — olduğu gibi ilet
     }
 
     // Forward everything else to client
@@ -506,7 +492,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
 
   clientWs.on("close", () => {
     console.log("[relay] Client disconnected — closing OpenAI connection");
-    logState("client-disconnect");
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 
