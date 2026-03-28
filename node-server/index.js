@@ -116,6 +116,7 @@ wss.on("connection", (clientWs, req) => {
   let isAwake = false;           // true after wake word detected, reset after response completes
   let pendingManualResponse = false; // true after we manually send response.create
   let transcriptionPrompt = "";  // cached prompt to detect hallucinations
+  let primedUntil = 0;           // timestamp — wake word heard but no content yet, accept next turn
 
   openaiWs.on("open", async () => {
     console.log("[relay] Connected to OpenAI Realtime API");
@@ -205,6 +206,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     wakeWordEnabled = !!wakeWord;
     isAwake = false;
     pendingManualResponse = false;
+    primedUntil = 0;
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
     // ▸ WAKE WORD — inject wake word rule into system prompt
@@ -311,11 +313,41 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           }
         }
 
-        if (wakeWordEnabled && !isAwake && containsWakeWord(transcript, wakeWord)) {
-          console.log(`[relay] ★ Wake word "${wakeWord}" detected — activating`);
-          isAwake = true;
-          pendingManualResponse = true;
-          openaiWs.send(JSON.stringify({ type: "response.create" }));
+        if (wakeWordEnabled && !isAwake) {
+          if (containsWakeWord(transcript, wakeWord)) {
+            // Check if there's meaningful content after the wake word
+            const normT = transcript.toLowerCase();
+            const normW = wakeWord.toLowerCase();
+            const wakeIdx = normT.indexOf(normW);
+            const afterWake = wakeIdx >= 0
+              ? normT.slice(wakeIdx + normW.length).replace(/[.,!?\s]/g, "").trim()
+              : "";
+
+            if (afterWake.length < 3) {
+              // Wake word without content — could be hallucination or "Hey Weya [pause] şunu yap"
+              // Prime for 7 seconds so the next turn is accepted without re-detecting wake word
+              console.log(`[relay] Wake word detected without content — priming for 7s`);
+              primedUntil = Date.now() + 7000;
+            } else {
+              // Wake word + meaningful content — activate immediately
+              console.log(`[relay] ★ Wake word "${wakeWord}" detected — activating`);
+              isAwake = true;
+              primedUntil = 0;
+              pendingManualResponse = true;
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
+          } else if (primedUntil > 0 && Date.now() < primedUntil) {
+            // No wake word in this transcript, but we're primed from a recent detection
+            // Activate if there's any meaningful speech content
+            const content = transcript.replace(/[.,!?\s]/g, "").trim();
+            if (content.length >= 3) {
+              console.log(`[relay] Primed state — activating on follow-up: "${transcript}"`);
+              isAwake = true;
+              primedUntil = 0;
+              pendingManualResponse = true;
+              openaiWs.send(JSON.stringify({ type: "response.create" }));
+            }
+          }
         }
         // Don't return — still forward transcript event to client
       }
@@ -325,10 +357,17 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       // ════════════════════════════════════════════════════════════════════════
       if (msg.type === "response.created") {
         if (wakeWordEnabled && !isAwake && !pendingManualResponse) {
-          // Auto-generated response while sleeping — cancel silently
-          console.log("[relay] Response cancelled (wake word not detected)");
-          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-          return; // don't forward to client
+          // Check if we're in primed state (wake word heard recently, waiting for content)
+          if (primedUntil > 0 && Date.now() < primedUntil) {
+            console.log("[relay] Primed state — allowing auto-generated response");
+            isAwake = true;
+            primedUntil = 0;
+          } else {
+            // Auto-generated response while sleeping — cancel silently
+            console.log("[relay] Response cancelled (wake word not detected)");
+            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            return; // don't forward to client
+          }
         }
         if (pendingManualResponse) {
           pendingManualResponse = false;
@@ -341,8 +380,16 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       if (msg.type === "response.done") {
         const status = msg.response?.status ?? msg.status;
         if (wakeWordEnabled && status === "completed") {
-          console.log("[relay] Response completed — going back to sleep");
-          isAwake = false;
+          // If the response contained a tool call, stay awake — the follow-up
+          // response (with KB results) still needs to be delivered
+          const output = msg.response?.output || [];
+          const hasToolCall = output.some(item => item.type === "function_call");
+          if (hasToolCall) {
+            console.log("[relay] Response completed with tool call — staying awake for follow-up");
+          } else {
+            console.log("[relay] Response completed — going back to sleep");
+            isAwake = false;
+          }
         }
         // "cancelled" or "failed" → don't touch isAwake (may have been
         // set by a concurrent wake word detection)
