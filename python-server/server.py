@@ -68,6 +68,23 @@ TOOLS = [
                     "enum": ["company_docs", "faq", "crm", "transcripts"],
                     "description": "Opsiyonel kategori filtresi. Emin değilsen boş bırak.",
                 },
+                "date_from": {
+                    "type": "string",
+                    "description": (
+                        "Başlangıç tarihi (ISO 8601 format, örn: '2026-03-27T00:00:00Z'). "
+                        "Kullanıcı 'geçen hafta', 'dün', 'geçen Cuma' gibi ifadeler kullandığında "
+                        "bugünün tarihini referans alarak uygun ISO tarihini hesapla. "
+                        "Tarih belirtilmemişse bu parametreyi gönderme."
+                    ),
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": (
+                        "Bitiş tarihi (ISO 8601 format, örn: '2026-03-28T23:59:59Z'). "
+                        "Kullanıcı 'geçen hafta' derse haftanın son gününü, 'dün' derse dünün sonunu yaz. "
+                        "Tarih belirtilmemişse bu parametreyi gönderme."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -86,11 +103,12 @@ KRİTİK KURALLAR:
 1. DİL: Varsayılan dilin Türkçe. İlk cümlenden itibaren Türkçe konuş. Sadece karşındaki İngilizce konuşursa İngilizce'ye geç. ASLA İspanyolca veya başka dil kullanma.
 2. BİLGİ TABANI: Şirket, kurucu, ekip, ürünler, hizmetler, fiyatlar, yatırımlar, müşteriler veya toplantı geçmişi hakkında bir soru sorulduğunda — ÖNCE search_knowledge_base aracını çağır, SONRA cevap ver. Aracı çağırmadan şirketle ilgili ASLA cevap verme. Bilgi tabanında sonuç yoksa "Bu konuda bilgi tabanımda kayıt bulamadım" de.
 3. KISA CEVAP: 2-3 cümle. Toplantı akışını bozma.
-4. KİMLİK: Yapay zeka olduğundan bahsetme, sorulmadıkça."""
+4. KİMLİK: Yapay zeka olduğundan bahsetme, sorulmadıkça.
+5. TARİH FİLTRESİ: Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. Bugünün tarihini referans al. Tarih belirtilmemişse parametreleri boş bırak."""
 
 
 # ─── Knowledge Base Search ────────────────────────────────────────────────────
-async def search_knowledge_base(query: str, category: str | None = None) -> str:
+async def search_knowledge_base(query: str, category: str | None = None, date_from: str | None = None, date_to: str | None = None) -> str:
     """Search the KB via Supabase RPC and return formatted results."""
     if not KB_ENABLED or not supabase or not openai_client:
         return "Bilgi tabanı devre dışı."
@@ -104,15 +122,15 @@ async def search_knowledge_base(query: str, category: str | None = None) -> str:
         query_embedding = embed_response.data[0].embedding
 
         # Search via Supabase RPC
-        result = supabase.rpc(
-            "search_knowledge_base",
-            {
-                "query_embedding": json.dumps(query_embedding),
-                "match_threshold": KB_MATCH_THRESHOLD,
-                "match_count": KB_MATCH_COUNT,
-                "filter_category": category,
-            },
-        ).execute()
+        rpc_params = {
+            "query_embedding": json.dumps(query_embedding),
+            "match_threshold": KB_MATCH_THRESHOLD,
+            "match_count": KB_MATCH_COUNT,
+            "filter_category": category,
+            "filter_date_from": date_from,
+            "filter_date_to": date_to,
+        }
+        result = supabase.rpc("search_knowledge_base", rpc_params).execute()
 
         data = result.data or []
         logger.info(f'[kb] Search: query="{query}", results={len(data)}')
@@ -156,6 +174,8 @@ async def handle_tool_call(openai_ws, msg: dict):
             tool_result = await search_knowledge_base(
                 args.get("query", ""),
                 args.get("category"),
+                args.get("date_from"),
+                args.get("date_to"),
             )
         except Exception as e:
             logger.error(f"[relay] KB search error: {e}")

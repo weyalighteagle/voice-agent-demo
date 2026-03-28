@@ -175,7 +175,12 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 ## ÖNEMLİ
 - Şirket bilgileri sorulduğunda eğer bilgi tabanı aktifse search_knowledge_base aracını kullan
 - Bilgi tabanı şu an devre dışı olabilir — bu durumda kendi bilginle en iyi cevabı ver
-- Sonuç yoksa veya emin değilsen "Bu konuda kesin bilgim yok, kontrol etmem gerekir" de, uydurma`;
+- Sonuç yoksa veya emin değilsen "Bu konuda kesin bilgim yok, kontrol etmem gerekir" de, uydurma
+
+---
+
+## TARİH FİLTRESİ
+Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. Bugünün tarihini referans al. Tarih belirtilmemişse parametreleri boş bırak.`;
 
     // ── Fetch config from main backend API ───────────────────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
@@ -369,7 +374,12 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           } else {
             try {
               const args = JSON.parse(rawArgs);
-              const results = await searchKnowledgeBase(args.query, args.category || null);
+              const results = await searchKnowledgeBase(
+                args.query,
+                args.category || null,
+                args.date_from || null,
+                args.date_to || null
+              );
               toolResult = formatKBResults(results);
               console.log(`[relay] KB search: query="${args.query}", results=${results.length}`);
             } catch (err) {

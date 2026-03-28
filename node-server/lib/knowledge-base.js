@@ -1,7 +1,7 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
-export async function searchKnowledgeBase(query, category = null) {
+export async function searchKnowledgeBase(query, category = null, dateFrom = null, dateTo = null) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -25,6 +25,9 @@ export async function searchKnowledgeBase(query, category = null) {
   if (category !== null && category !== undefined && category !== "") {
     rpcParams.filter_category = category;
   }
+
+  if (dateFrom) rpcParams.filter_date_from = dateFrom;
+  if (dateTo) rpcParams.filter_date_to = dateTo;
 
   const { data, error } = await supabase.rpc(
     "search_knowledge_base",
