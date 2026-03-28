@@ -16,7 +16,11 @@ export const TOOLS = [
           type: "string",
           enum: ["company_docs", "faq", "crm", "transcripts"],
           description:
-            "Arama yapılacak kategori. ZORUNLUDUR, boş bırakma. Seçim rehberi: 'company_docs' → şirket dökümanları, politikalar, süreçler, genel şirket bilgisi; 'faq' → sık sorulan sorular, fiyatlandırma, ürün/hizmet detayları; 'crm' → müşteri bilgileri, müşteri geçmişi, ilişki yönetimi; 'transcripts' → geçmiş toplantılar, önceki görüşmeler, konuşma kayıtları. Emin değilsen 'company_docs' seç.",
+            "Arama yapılacak kategori. ZORUNLUDUR, boş bırakma. Seçim KURALLARI (sırayla kontrol et):\n" +
+            "1. Kullanıcı 'toplantı', 'görüşme', 'konuştuk', 'geçen hafta ne dedik', 'daha önce bahsetmiştik' gibi ifadeler kullanıyorsa → 'transcripts'\n" +
+            "2. Kullanıcı bir müşteri adı, firma adı soruyor veya 'müşteri', 'firma', 'portföy', 'iletişim bilgisi' diyorsa → 'crm'\n" +
+            "3. Kullanıcı 'fiyat', 'ücret', 'nasıl yapılır', 'süreç nedir', 'sık sorulan' diyorsa → 'faq'\n" +
+            "4. Yukarıdakilerin hiçbiri uymuyorsa → 'company_docs'",
         },
         date_from: {
           type: "string",
