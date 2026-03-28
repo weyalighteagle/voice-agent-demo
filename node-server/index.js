@@ -29,7 +29,7 @@ function buildTranscriptionPrompt(language, wakeWord) {
     let prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
     prompt += ` Özel isimler: ${properNouns}.`;
     if (wakeWord) {
-      prompt += ` "${wakeWord}" bir tetikleme kelimesidir, bu kelimeyi duyduğunda tam olarak "${wakeWord}" yaz.`;
+      prompt += ` "${wakeWord}" bir tetikleme kelimesidir, bu kelimeyi duyduğunda tam olarak "${wakeWord}" yaz. Sessizlik veya belirsiz ses varsa boş bırak, olmayan kelimeleri üretme.`;
     }
     return prompt;
   }
