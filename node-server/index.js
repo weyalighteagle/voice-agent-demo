@@ -22,28 +22,34 @@ if (!OPENAI_API_KEY) {
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
+// FIX 1: Removed aggressive "tetikleme kelimesi / trigger phrase" framing
+//        that caused ASR to hallucinate wake word during silence.
+//        Wake word is now listed as a regular proper noun with soft spelling guidance.
+//        Added explicit anti-hallucination instruction.
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
 
   if (language === "tr") {
     let prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
-    prompt += ` Özel isimler: ${properNouns}.`;
+    prompt += ` Özel isimler ve sık geçen kelimeler: ${properNouns}.`;
     if (wakeWord) {
-      prompt += ` "${wakeWord}" bir tetikleme kelimesidir, bu kelimeyi duyduğunda tam olarak "${wakeWord}" yaz. Sessizlik veya belirsiz ses varsa boş bırak, olmayan kelimeleri üretme.`;
+      prompt += ` "${wakeWord}" bir isimdir, bu şekilde yazılmalıdır.`;
+      prompt += ` Sessizlik veya belirsiz ses varsa boş bırak, olmayan kelimeleri üretme.`;
     }
     return prompt;
   }
 
   if (language === "en") {
     let prompt = "This is an English meeting recording. Transcribe only in English.";
-    prompt += ` Proper nouns: ${properNouns}.`;
+    prompt += ` Proper nouns and common terms: ${properNouns}.`;
     if (wakeWord) {
-      prompt += ` "${wakeWord}" is a trigger phrase, always transcribe it exactly as "${wakeWord}".`;
+      prompt += ` "${wakeWord}" is a name, spell it as shown.`;
+      prompt += ` If there is silence or unclear audio, leave it empty. Do not hallucinate words.`;
     }
     return prompt;
   }
 
-  return wakeWord ? `Trigger word: "${wakeWord}".` : "";
+  return "";
 }
 
 // ── Knowledge Base ────────────────────────────────────────────────────────────
@@ -379,19 +385,17 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         console.log(`[relay] response.created id=${respId}`);
         logState("resp.created");
 
+        // FIX 2: Removed pendingWakeUpTimer check from this gate.
+        // Previously, VAD auto-responses during pendingWakeUp were accepted,
+        // causing bot to respond to random speech (e.g. "Eee...") after a
+        // hallucinated "Hey Veya." transcript.
+        // Now activation ONLY happens via transcript content (in the transcript handler above).
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Check if we're in pending wake-up state (VAD auto-triggered after wake word)
-          if (pendingWakeUpTimer && Date.now() < pendingWakeUpTimer) {
-            console.log(`[relay] Pending wake-up — accepting auto-response ${respId} as follow-up`);
-            isAwake = true;
-            pendingWakeUpTimer = null;
-          } else {
-            // Auto-generated response while sleeping — cancel
-            console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
-            activeResponseId = respId;
-            openaiWs.send(JSON.stringify({ type: "response.cancel" }));
-            return;
-          }
+          // Auto-generated response while sleeping — always cancel
+          console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
+          activeResponseId = respId;
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+          return;
         }
 
         // Legitimate response — accept and track
@@ -421,8 +425,8 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         for (const item of output) {
           if (item.type === "message" && item.content) {
             for (const c of item.content) {
-              if (c.type === "audio" && c.transcript) {
-                console.log(`[bot-transcript] "${c.transcript.slice(0, 120)}${c.transcript.length > 120 ? "..." : ""}"`);
+              if ((c.type === "audio" || c.type === "output_audio") && c.transcript) {
+                console.log(`[bot-transcript] "${c.transcript.slice(0, 200)}${c.transcript.length > 200 ? "..." : ""}"`);
               }
             }
           }
@@ -459,8 +463,9 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
 
       // ════════════════════════════════════════════════════════════════════
       // ▸ LOG — bot's spoken response text (what the avatar actually says)
+      // FIX 3: Listen to both beta and GA event names
       // ════════════════════════════════════════════════════════════════════
-      if (msg.type === "response.audio_transcript.done") {
+      if (msg.type === "response.output_audio_transcript.done" || msg.type === "response.audio_transcript.done") {
         console.log(`[bot-says] "${msg.transcript || ""}"`);
       }
 
