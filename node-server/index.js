@@ -348,9 +348,8 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
               // Wake word alone (e.g. "Hey Veya." or hallucinated "Hey Veya")
               // → Don't activate yet. Wait for next transcript with actual content.
               // Set a timeout: if no content arrives within 8s, expire.
-              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — waiting for follow-up`);
-              pendingWakeUpTimer = Date.now() + 8000;
-              logState("pending-wakeup");
+              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
+              logState("wake-only-ignored");
             }
           } else if (pendingWakeUpTimer && Date.now() < pendingWakeUpTimer) {
             // We heard wake word recently but this transcript has no wake word.
