@@ -5,6 +5,7 @@ import { TOOLS } from "./lib/tools.js";
 import { searchKnowledgeBase, formatKBResults } from "./lib/knowledge-base.js";
 import { fetchVoiceAgentConfig } from "./lib/fetch-config.js";
 import { containsWakeWord } from "./lib/wake-word.js";
+import { WhisperTranscriber, isWhisperEnabled } from "./lib/whisper-transcription.js";
 
 dotenv.config();
 
@@ -15,6 +16,12 @@ const PORT = process.env.PORT ?? 3000;
 
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
 const OPENAI_REALTIME_URL = `wss://api.openai.com/v1/realtime?model=${OPENAI_MODEL}`;
+
+// ── Transcription engine selection ────────────────────────────────────────────
+// WHISPER_TRANSCRIPTION=true → Whisper API (batch, better Turkish accuracy)
+// Otherwise → OpenAI Realtime built-in transcription (streaming but worse Turkish)
+const USE_WHISPER = isWhisperEnabled();
+console.log(`[relay] Transcription engine: ${USE_WHISPER ? `Whisper (${process.env.WHISPER_MODEL || "whisper-1"})` : "OpenAI Realtime built-in"}`);
 
 if (!OPENAI_API_KEY) {
   console.error("[relay] OPENAI_API_KEY is required");
@@ -74,6 +81,7 @@ const httpServer = createServer((req, res) => {
       status: "ok",
       model: OPENAI_MODEL,
       kb: KB_ENABLED,
+      transcription: USE_WHISPER ? `whisper-${process.env.WHISPER_MODEL || "whisper-1"}` : "openai-realtime",
       timestamp: Date.now(),
     }));
     return;
@@ -108,15 +116,75 @@ wss.on("connection", (clientWs, req) => {
   // ══════════════════════════════════════════════════════════════════════════
   let wakeWord = null;
   let wakeWordEnabled = false;
-  let isAwake = false;              // true = wake word detected, bot may speak
-  let pendingManualResponse = false; // true = we sent response.create, next response.created is ours
+  let isAwake = false;
+  let pendingManualResponse = false;
   let transcriptionPrompt = "";
-  let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
-  let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
+  let activeResponseId = null;
+  let awaitingToolFollowUp = false;
+  let pendingWakeUpTimer = null;
+  let language = "tr";
+
+  // ▸ Whisper transcriber instance (per connection)
+  let whisper = null;
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
-    console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp}`);
+    const wakeUp = pendingWakeUpTimer ? `${Math.max(0, Math.round((pendingWakeUpTimer - Date.now()) / 1000))}s` : "none";
+    console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp} wakeUp=${wakeUp}`);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ▸ TRANSCRIPT HANDLER — shared between Whisper and OpenAI fallback
+  // ══════════════════════════════════════════════════════════════════════════
+  function handleTranscript(transcript, source = "whisper") {
+    console.log(`[relay] Transcript (${source}): "${transcript}"`);
+    logState("transcript");
+
+    // ── Wake word detection (only when sleeping)
+    if (wakeWordEnabled && !isAwake) {
+      const wakeMatch = containsWakeWord(transcript, wakeWord);
+      console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
+      if (wakeMatch) {
+        const remainder = transcript.toLowerCase()
+          .replace(/hey/gi, "")
+          .replace(/weya/gi, "")
+          .replace(/veya/gi, "")
+          .replace(/wey[aä]/gi, "")
+          .replace(/vey[aä]/gi, "")
+          .replace(/[.,!?\s]/g, "")
+          .trim();
+
+        if (remainder.length >= 3) {
+          console.log(`[relay] ★ WAKE WORD + CONTENT detected: "${transcript}" (remainder="${remainder}")`);
+          isAwake = true;
+          pendingManualResponse = true;
+          pendingWakeUpTimer = null;
+          logState("activated-with-content");
+          openaiWs.send(JSON.stringify({ type: "response.create" }));
+        } else {
+          console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — waiting for follow-up`);
+          pendingWakeUpTimer = Date.now() + 8000;
+          logState("pending-wakeup");
+        }
+      } else if (pendingWakeUpTimer && Date.now() < pendingWakeUpTimer) {
+        const content = transcript.replace(/[.,!?\s]/g, "").trim();
+        if (content.length >= 3) {
+          console.log(`[relay] ★ FOLLOW-UP CONTENT after wake word: "${transcript}"`);
+          isAwake = true;
+          pendingManualResponse = true;
+          pendingWakeUpTimer = null;
+          logState("activated-follow-up");
+          openaiWs.send(JSON.stringify({ type: "response.create" }));
+        } else {
+          console.log(`[relay] Follow-up transcript too short, still waiting: "${transcript}"`);
+        }
+      } else {
+        if (pendingWakeUpTimer && Date.now() >= pendingWakeUpTimer) {
+          console.log(`[relay] Pending wake-up expired`);
+          pendingWakeUpTimer = null;
+        }
+      }
+    }
   }
 
   openaiWs.on("open", async () => {
@@ -186,7 +254,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     // ── Fetch config from main backend API ───────────────────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
 
-    let instructions, voice, language;
+    let instructions, voice;
     if (apiConfig) {
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
@@ -208,6 +276,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     pendingManualResponse = false;
     activeResponseId = null;
     awaitingToolFollowUp = false;
+    pendingWakeUpTimer = null;
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
     if (wakeWordEnabled) {
@@ -215,6 +284,45 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     }
 
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
+
+    // ── Initialise Whisper transcriber (if enabled) ──────────────────────────
+    if (USE_WHISPER) {
+      whisper = new WhisperTranscriber({
+        language,
+        sampleRate: 24000,
+        prompt: transcriptionPrompt,
+        onTranscript: (transcript) => {
+          handleTranscript(transcript, "whisper");
+        },
+        onError: (err) => {
+          console.error("[relay] Whisper error:", err.message);
+        },
+      });
+      console.log("[relay] Whisper transcriber ready");
+    }
+
+    // ── Session update ───────────────────────────────────────────────────────
+    // When Whisper is active, we disable OpenAI's input transcription to avoid
+    // duplicate processing and reduce hallucinations. The Realtime API still
+    // hears and understands audio for responses — only transcript callbacks change.
+    const audioInputConfig = {
+      format: { type: "audio/pcm", rate: 24000 },
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 600,
+      },
+    };
+
+    // Only add OpenAI transcription if Whisper is NOT active
+    if (!USE_WHISPER) {
+      audioInputConfig.transcription = {
+        model: "gpt-4o-mini-transcribe-2025-12-15",
+        language,
+        prompt: transcriptionPrompt,
+      };
+    }
 
     const sessionUpdate = {
       type: "session.update",
@@ -224,20 +332,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         instructions,
         ...(KB_ENABLED ? { tools: TOOLS } : {}),
         audio: {
-          input: {
-            format: { type: "audio/pcm", rate: 24000 },
-            transcription: {
-              model: "gpt-4o-mini-transcribe-2025-12-15",
-              language,
-              prompt: transcriptionPrompt,
-            },
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 600,
-            },
-          },
+          input: audioInputConfig,
           output: {
             format: { type: "audio/pcm", rate: 24000 },
             voice,
@@ -248,7 +343,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
 
     console.log("[relay] Sending session.update:", JSON.stringify(sessionUpdate, null, 2));
     openaiWs.send(JSON.stringify(sessionUpdate));
-    console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
+    console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}, transcription=${USE_WHISPER ? "whisper" : "openai-realtime"}`);
 
     while (messageQueue.length > 0) {
       openaiWs.send(messageQueue.shift());
@@ -281,66 +376,56 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       }
 
       // ════════════════════════════════════════════════════════════════════
-      // ▸ TRANSCRIPT — wake word detection + hallucination guards
+      // ▸ VAD EVENTS — drive Whisper buffer lifecycle
       // ════════════════════════════════════════════════════════════════════
       if (msg.type === "input_audio_buffer.speech_started") {
         console.log(`[vad] Speech started`);
         logState("speech-start");
+
+        // Clear Whisper buffer — new utterance starting
+        if (USE_WHISPER && whisper) {
+          whisper.clear();
+        }
       }
+
       if (msg.type === "input_audio_buffer.speech_stopped") {
         console.log(`[vad] Speech stopped`);
+
+        // Flush Whisper buffer — utterance ended, transcribe now
+        if (USE_WHISPER && whisper) {
+          whisper.flush().catch((err) => {
+            console.error("[relay] Whisper flush error:", err.message);
+          });
+        }
       }
 
+      // ════════════════════════════════════════════════════════════════════
+      // ▸ TRANSCRIPT — OpenAI built-in (only used when Whisper is off)
+      // ════════════════════════════════════════════════════════════════════
       if (msg.type === "conversation.item.input_audio_transcription.completed") {
         const transcript = msg.transcript || "";
-        console.log(`[relay] Transcript: "${transcript}"`);
-        logState("transcript");
 
-        // ── Guard: Prompt echo (ASR outputs its own prompt as transcript)
-        if (transcriptionPrompt && transcript.length > 40) {
-          const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
-          const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
-          const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
-          const matchCount = promptWords.filter(w => normT.includes(w)).length;
-          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
-            console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
-            if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
-            return;
-          }
-        }
+        if (USE_WHISPER) {
+          // Whisper is active — ignore OpenAI transcripts for wake word
+          console.log(`[relay] OpenAI transcript (ignored, using Whisper): "${transcript}"`);
+        } else {
+          // OpenAI fallback path — full processing
 
-        // ── Wake word detection (only when sleeping)
-        if (wakeWordEnabled && !isAwake) {
-          const wakeMatch = containsWakeWord(transcript, wakeWord);
-          console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
-          if (wakeMatch) {
-            // Check if there's meaningful content AFTER the wake word.
-            const remainder = transcript.toLowerCase()
-              .replace(/hey/gi, "")
-              .replace(/weya/gi, "")
-              .replace(/veya/gi, "")
-              .replace(/wey[aä]/gi, "")
-              .replace(/vey[aä]/gi, "")
-              .replace(/[.,!?\s]/g, "")
-              .trim();
-
-            if (remainder.length >= 3) {
-              // Wake word + real content → activate immediately
-              console.log(`[relay] ★ WAKE WORD + CONTENT detected: "${transcript}" (remainder="${remainder}")`);
-              isAwake = true;
-              pendingManualResponse = true;
-              logState("activated-with-content");
-              openaiWs.send(JSON.stringify({ type: "response.create" }));
-            } else {
-              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
-              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
-              logState("wake-only-ignored");
+          // ── Guard: Prompt echo (ASR outputs its own prompt as transcript)
+          if (transcriptionPrompt && transcript.length > 40) {
+            const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
+            const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
+            const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
+            const matchCount = promptWords.filter(w => normT.includes(w)).length;
+            if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
+              console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
+              if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
+              return;
             }
-          } else {
-            // No wake word → ignore
           }
+
+          handleTranscript(transcript, "openai-realtime");
         }
-        // Always forward transcript to client
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -352,14 +437,12 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
         }
 
-        // Legitimate response — accept and track
         activeResponseId = respId;
         if (pendingManualResponse) {
           console.log(`[relay] Consuming pendingManualResponse for ${respId}`);
@@ -416,16 +499,12 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         logState("resp.done-final");
       }
 
-      // ════════════════════════════════════════════════════════════════════
       // ▸ LOG — bot's spoken response text
-      // ════════════════════════════════════════════════════════════════════
       if (msg.type === "response.output_audio_transcript.done" || msg.type === "response.audio_transcript.done") {
         console.log(`[bot-says] "${msg.transcript || ""}"`);
       }
 
-      // ════════════════════════════════════════════════════════════════════
       // ▸ AUDIO SUPPRESSION — don't forward audio while sleeping
-      // ════════════════════════════════════════════════════════════════════
       if (wakeWordEnabled && !isAwake) {
         if (
           msg.type === "response.output_audio.delta" ||
@@ -505,6 +584,34 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     }
   });
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── Client → OpenAI message relay + Whisper audio feed
+  // ══════════════════════════════════════════════════════════════════════════
+  clientWs.on("message", (data) => {
+    const raw = data.toString();
+
+    // ── Intercept audio messages to feed Whisper ────────────────────────────
+    if (USE_WHISPER && whisper) {
+      try {
+        const msg = JSON.parse(raw);
+        if (msg.type === "input_audio_buffer.append" && msg.audio) {
+          // Decode base64 PCM16 and feed to Whisper buffer
+          const pcmBuffer = Buffer.from(msg.audio, "base64");
+          whisper.feedAudio(pcmBuffer);
+        }
+      } catch {
+        // Not JSON or parse error — ignore, still forward to OpenAI
+      }
+    }
+
+    // Always forward to OpenAI (it still needs audio for understanding + VAD)
+    if (openaiWs.readyState === WebSocket.OPEN) {
+      openaiWs.send(raw);
+    } else {
+      messageQueue.push(raw);
+    }
+  });
+
   // ── Connection lifecycle ───────────────────────────────────────────────────
   openaiWs.on("close", (code, reason) => {
     console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
@@ -516,16 +623,8 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
-  clientWs.on("message", (data) => {
-    if (openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.send(data.toString());
-    } else {
-      messageQueue.push(data.toString());
-    }
-  });
-
   clientWs.on("close", () => {
-    console.log("[relay] Client disconnected — closing OpenAI connection");
+    console.log("[relay] Client disconnected — closing connections");
     logState("client-disconnect");
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
@@ -541,12 +640,15 @@ httpServer.listen(PORT, () => {
   console.log(`[relay] Server listening on port ${PORT}`);
   console.log(`[relay] Model: ${OPENAI_MODEL}`);
   console.log(`[relay] Knowledge base: ${KB_ENABLED ? "ENABLED" : "DISABLED"}`);
+  console.log(`[relay] Transcription: ${USE_WHISPER ? `Whisper (${process.env.WHISPER_MODEL || "whisper-1"})` : "OpenAI Realtime built-in"}`);
   console.log("[relay] Startup diagnostics:", {
     PORT,
     MODEL: OPENAI_MODEL,
     SUPABASE_URL: process.env.SUPABASE_URL ? "set" : "MISSING",
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
+    WHISPER_TRANSCRIPTION: USE_WHISPER ? "ENABLED" : "DISABLED",
+    WHISPER_MODEL: process.env.WHISPER_MODEL || "whisper-1 (default)",
     BACKEND_API_URL: process.env.BACKEND_API_URL ? "set" : "MISSING",
     KB_ENABLED,
   });
