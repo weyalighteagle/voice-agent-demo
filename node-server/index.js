@@ -235,7 +235,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
               type: "server_vad",
               threshold: 0.5,
               prefix_padding_ms: 300,
-              silence_duration_ms: 600,
+              silence_duration_ms: 400,
             },
           },
           output: {
