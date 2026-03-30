@@ -22,10 +22,6 @@ if (!OPENAI_API_KEY) {
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
-// FIX 1: Removed aggressive "tetikleme kelimesi / trigger phrase" framing
-//        that caused ASR to hallucinate wake word during silence.
-//        Wake word is now listed as a regular proper noun with soft spelling guidance.
-//        Added explicit anti-hallucination instruction.
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
 
@@ -117,12 +113,10 @@ wss.on("connection", (clientWs, req) => {
   let transcriptionPrompt = "";
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
-  let pendingWakeUpTimer = null;     // timestamp — wake word heard without content, waiting for follow-up
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
-    const wakeUp = pendingWakeUpTimer ? `${Math.max(0, Math.round((pendingWakeUpTimer - Date.now()) / 1000))}s` : "none";
-    console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp} wakeUp=${wakeUp}`);
+    console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp}`);
   }
 
   openaiWs.on("open", async () => {
@@ -214,7 +208,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     pendingManualResponse = false;
     activeResponseId = null;
     awaitingToolFollowUp = false;
-    pendingWakeUpTimer = null;
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
     if (wakeWordEnabled) {
@@ -274,7 +267,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       // ── Error handling — suppress cancel spam ───────────────────────────
       if (msg.type === "error") {
         if (msg.error?.code === "response_cancel_not_active") {
-          // Harmless: we tried to cancel but there was nothing to cancel
           return;
         }
         console.error("[relay] OpenAI ERROR:", JSON.stringify(msg, null, 2));
@@ -323,9 +315,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
           if (wakeMatch) {
             // Check if there's meaningful content AFTER the wake word.
-            // Use containsWakeWord's fuzzy matching to find approximate position,
-            // then check what's left. Since we can't get exact fuzzy match position,
-            // strip all known wake word variants + "hey" and check remainder.
             const remainder = transcript.toLowerCase()
               .replace(/hey/gi, "")
               .replace(/weya/gi, "")
@@ -336,41 +325,19 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
               .trim();
 
             if (remainder.length >= 3) {
-              // Wake word + real content (e.g. "Hey Veya, geçen cuma ne oldu?")
-              // → Activate immediately
+              // Wake word + real content → activate immediately
               console.log(`[relay] ★ WAKE WORD + CONTENT detected: "${transcript}" (remainder="${remainder}")`);
               isAwake = true;
               pendingManualResponse = true;
-              pendingWakeUpTimer = null;
               logState("activated-with-content");
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             } else {
-              // Wake word alone (e.g. "Hey Veya." or hallucinated "Hey Veya")
-              // → Don't activate yet. Wait for next transcript with actual content.
-              // Set a timeout: if no content arrives within 8s, expire.
+              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
               console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
               logState("wake-only-ignored");
             }
-          } else if (pendingWakeUpTimer && Date.now() < pendingWakeUpTimer) {
-            // We heard wake word recently but this transcript has no wake word.
-            // If there's meaningful content, THIS is the actual command.
-            const content = transcript.replace(/[.,!?\s]/g, "").trim();
-            if (content.length >= 3) {
-              console.log(`[relay] ★ FOLLOW-UP CONTENT after wake word: "${transcript}"`);
-              isAwake = true;
-              pendingManualResponse = true;
-              pendingWakeUpTimer = null;
-              logState("activated-follow-up");
-              openaiWs.send(JSON.stringify({ type: "response.create" }));
-            } else {
-              console.log(`[relay] Follow-up transcript too short, still waiting: "${transcript}"`);
-            }
           } else {
-            // No wake word, no pending wake-up → just ignore
-            if (pendingWakeUpTimer && Date.now() >= pendingWakeUpTimer) {
-              console.log(`[relay] Pending wake-up expired`);
-              pendingWakeUpTimer = null;
-            }
+            // No wake word → ignore
           }
         }
         // Always forward transcript to client
@@ -384,11 +351,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         console.log(`[relay] response.created id=${respId}`);
         logState("resp.created");
 
-        // FIX 2: Removed pendingWakeUpTimer check from this gate.
-        // Previously, VAD auto-responses during pendingWakeUp were accepted,
-        // causing bot to respond to random speech (e.g. "Eee...") after a
-        // hallucinated "Hey Veya." transcript.
-        // Now activation ONLY happens via transcript content (in the transcript handler above).
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
           // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
@@ -405,7 +367,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         }
         if (awaitingToolFollowUp) {
           console.log(`[relay] Tool follow-up response accepted: ${respId}`);
-          // Don't clear awaitingToolFollowUp here — clear it when this response completes
         }
         logState("resp.created-OK");
       }
@@ -420,7 +381,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         const outputTypes = output.map(item => item.type);
 
         console.log(`[relay] response.done id=${respId} status=${status} outputs=[${outputTypes}]`);
-        // Log output text snippets if any
         for (const item of output) {
           if (item.type === "message" && item.content) {
             for (const c of item.content) {
@@ -437,22 +397,18 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
             const hasToolCall = output.some(item => item.type === "function_call");
 
             if (hasToolCall) {
-              // Tool call response completed — stay awake for the follow-up
               awaitingToolFollowUp = true;
               console.log(`[relay] TOOL CALL detected in response — awaitingToolFollowUp=true, staying awake`);
             } else if (awaitingToolFollowUp) {
-              // This is the follow-up response after tool call — NOW go to sleep
               awaitingToolFollowUp = false;
               isAwake = false;
               console.log(`[relay] TOOL FOLLOW-UP completed — going to sleep`);
             } else {
-              // Normal response (no tool) — go to sleep
               isAwake = false;
               console.log(`[relay] NORMAL response completed — going to sleep`);
             }
           } else if (status === "cancelled") {
             console.log(`[relay] Response ${respId} was cancelled`);
-            // Don't change isAwake — might have been user interruption
           }
         }
 
@@ -461,8 +417,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       }
 
       // ════════════════════════════════════════════════════════════════════
-      // ▸ LOG — bot's spoken response text (what the avatar actually says)
-      // FIX 3: Listen to both beta and GA event names
+      // ▸ LOG — bot's spoken response text
       // ════════════════════════════════════════════════════════════════════
       if (msg.type === "response.output_audio_transcript.done" || msg.type === "response.audio_transcript.done") {
         console.log(`[bot-says] "${msg.transcript || ""}"`);
@@ -520,7 +475,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           toolResult = `Bilinmeyen araç: ${name}`;
         }
 
-        // Send function output back to OpenAI
         openaiWs.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
@@ -530,10 +484,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           },
         }));
 
-        // Mark next response.created as legitimate
         pendingManualResponse = true;
-
-        // Trigger follow-up response
         openaiWs.send(JSON.stringify({ type: "response.create" }));
         console.log(`[relay] Tool output sent, response.create triggered for call_id=${call_id}`);
         logState("tool-done");
