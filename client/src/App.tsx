@@ -50,8 +50,13 @@ export default function App() {
     source.connect(audioCtxRef.current.destination);
     source.onended = () => {
       currentSourceRef.current = null;
-      isPlayingRef.current = false;
-      playNextChunk();
+      // Kuyruk bittiyse isPlaying'i false yap, bir sonraki chunk varsa devam et
+      if (playbackQueueRef.current.length === 0) {
+        isPlayingRef.current = false;
+      } else {
+        isPlayingRef.current = false;
+        playNextChunk();
+      }
     };
     source.start();
     currentSourceRef.current = source;
@@ -104,6 +109,14 @@ export default function App() {
       processor.onaudioprocess = (e) => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
+        // ── BOT KONUŞURKEN MİKROFON GÖNDERİMİNİ DURDUR ──────────────────
+        // Bot'un kendi sesini input olarak algılamasını (echo) önler.
+        // isPlayingRef: ses çıkışı aktif mi
+        // isRespondingRef: OpenAI'dan response akışı devam ediyor mu
+        if (isPlayingRef.current || isRespondingRef.current) {
+          return;
+        }
+
         const float32 = e.inputBuffer.getChannelData(0);
         // Convert Float32 → PCM16 little-endian
         const pcm16 = new Int16Array(float32.length);
@@ -142,6 +155,10 @@ export default function App() {
           }
           case "response.done": {
             isRespondingRef.current = false;
+            // Kuyrukta ses kalmadıysa isPlaying'i de sıfırla
+            if (playbackQueueRef.current.length === 0 && !currentSourceRef.current) {
+              isPlayingRef.current = false;
+            }
             break;
           }
           case "response.output_audio.delta":
