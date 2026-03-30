@@ -108,14 +108,11 @@ wss.on("connection", (clientWs, req) => {
   // ══════════════════════════════════════════════════════════════════════════
   let wakeWord = null;
   let wakeWordEnabled = false;
-  let isAwake = false;               // true = wake word detected, bot may speak
-  let pendingManualResponse = false;  // true = we sent response.create, next response.created is ours
+  let isAwake = false;              // true = wake word detected, bot may speak
+  let pendingManualResponse = false; // true = we sent response.create, next response.created is ours
   let transcriptionPrompt = "";
-  let activeResponseId = null;        // currently active legitimate response ID
-  let awaitingToolFollowUp = false;   // true = tool call done, waiting for follow-up response
-  // Track response IDs we intentionally blocked so response.done for those
-  // IDs does not affect sleep state.
-  const blockedResponseIds = new Set();
+  let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
+  let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -211,7 +208,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     pendingManualResponse = false;
     activeResponseId = null;
     awaitingToolFollowUp = false;
-    blockedResponseIds.clear();
     console.log(`[relay] Wake word: ${wakeWordEnabled ? `"${wakeWord}"` : "DISABLED"}`);
 
     if (wakeWordEnabled) {
@@ -336,8 +332,8 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
               logState("activated-with-content");
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             } else {
-              // Wake word alone → ignore, do not activate
-              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring`);
+              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
+              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
               logState("wake-only-ignored");
             }
           } else {
@@ -356,10 +352,9 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — cancel and mark as blocked.
-          // Do NOT touch activeResponseId so state remains clean.
+          // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
-          blockedResponseIds.add(respId);
+          activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
         }
@@ -386,15 +381,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
         const outputTypes = output.map(item => item.type);
 
         console.log(`[relay] response.done id=${respId} status=${status} outputs=[${outputTypes}]`);
-
-        // If this was a response we intentionally blocked, ignore it entirely.
-        if (blockedResponseIds.has(respId)) {
-          blockedResponseIds.delete(respId);
-          console.log(`[relay] response.done for blocked response ${respId} — skipping state change`);
-          logState("resp.done-blocked");
-          return;
-        }
-
         for (const item of output) {
           if (item.type === "message" && item.content) {
             for (const c of item.content) {
@@ -411,24 +397,18 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
             const hasToolCall = output.some(item => item.type === "function_call");
 
             if (hasToolCall) {
-              // Tool call response — stay awake for follow-up
               awaitingToolFollowUp = true;
               console.log(`[relay] TOOL CALL detected in response — awaitingToolFollowUp=true, staying awake`);
             } else if (awaitingToolFollowUp) {
-              // Follow-up after tool call — go to sleep
               awaitingToolFollowUp = false;
               isAwake = false;
               console.log(`[relay] TOOL FOLLOW-UP completed — going to sleep`);
             } else {
-              // Normal response — go to sleep
               isAwake = false;
               console.log(`[relay] NORMAL response completed — going to sleep`);
             }
           } else if (status === "cancelled") {
-            // User interrupted the bot — go back to sleep
-            isAwake = false;
-            awaitingToolFollowUp = false;
-            console.log(`[relay] Response ${respId} cancelled by user interruption — going to sleep`);
+            console.log(`[relay] Response ${respId} was cancelled`);
           }
         }
 
@@ -495,7 +475,6 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           toolResult = `Bilinmeyen araç: ${name}`;
         }
 
-        // Send function output back to OpenAI
         openaiWs.send(JSON.stringify({
           type: "conversation.item.create",
           item: {
@@ -505,10 +484,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           },
         }));
 
-        // Mark next response.created as legitimate
         pendingManualResponse = true;
-
-        // Trigger follow-up response
         openaiWs.send(JSON.stringify({ type: "response.create" }));
         console.log(`[relay] Tool output sent, response.create triggered for call_id=${call_id}`);
         logState("tool-done");
