@@ -1,0 +1,9 @@
+node_modules/
+.env
+node-server/.env
+node-server/test-chat.js
+node-server/test-kb-search.js
+node-server/migrations/
+node-server/backfill-all-transcripts.js
+node-server/re-embed-all.js
+node-server/coherus-pt2.txt

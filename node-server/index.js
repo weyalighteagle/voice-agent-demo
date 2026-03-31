@@ -202,6 +202,12 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
       wakeWord = null;
     }
 
+    // ── Inject today's date so the LLM can resolve relative dates ─────────
+    const today = new Date();
+    const dateStr = today.toLocaleDateString('tr-TR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const isoDate = today.toISOString().split('T')[0];
+    instructions = `Bugünün tarihi: ${dateStr} (${isoDate}). "bugün", "dün", "geçen hafta" gibi göreceli tarih ifadelerini bu tarihe göre hesapla.\nEğer ilk aramada istediğin sonucu bulamazsan, farklı anahtar kelimelerle veya farklı parametrelerle tekrar ara. Örneğin: önce toplantı başlığıyla ara (meeting_title kullanarak), sonra kişi adıyla daralt. Tek bir aramada bulamazsan HEMEN vazgeçme.\n\n${instructions}`;
+
     // ▸ Initialise state
     wakeWordEnabled = !!wakeWord;
     isAwake = false;
@@ -452,20 +458,14 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
           } else {
             try {
               const args = JSON.parse(rawArgs);
-              console.log(`[relay] KB SEARCH: query="${args.query}" category="${args.category}" from="${args.date_from || "-"}" to="${args.date_to || "-"}"`);
-              const results = await searchKnowledgeBase(
-                args.query,
-                args.category || null,
-                args.date_from || null,
-                args.date_to || null
-              );
+              const results = await searchKnowledgeBase(args.query, {
+                category: args.category || null,
+                date_from: args.date_from || null,
+                date_to: args.date_to || null,
+                meeting_title: args.meeting_title || null,
+              });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB RESULTS: ${results.length} documents found`);
-              if (results.length > 0) {
-                results.forEach((r, i) => {
-                  console.log(`[relay]   [${i+1}] "${r.document_title}" (${r.category_name}) similarity=${(r.similarity * 100).toFixed(0)}%`);
-                });
-              }
+              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_title=${args.meeting_title || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";

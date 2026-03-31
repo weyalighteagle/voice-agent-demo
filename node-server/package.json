@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "npx nodemon index.js",
-    "ingest": "node ingest.js"
+    "ingest": "node ingest.js",
+    "test": "node test-chat.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.0",
