@@ -82,12 +82,20 @@ async function ingest({ title, category, text, filePath, botId }) {
   const chunks = chunkText(content);
   console.log(`${chunks.length} chunk oluşturuldu`);
 
-  console.log("Embedding'ler oluşturuluyor...");
-  const embeddings = await createEmbeddings(chunks);
+  // Prepend document title to each chunk for better semantic search
+  // This ensures title keywords (meeting names, company names, dates) are in the vector space
+  const chunksWithTitle = chunks.map(chunk => `[${title}]\n\n${chunk}`);
 
+  console.log("Embedding'ler oluşturuluyor...");
+  const embeddings = await createEmbeddings(chunksWithTitle);
+
+  // When creating the rows to insert, use chunksWithTitle instead of chunks:
   const rows = chunks.map((chunk, i) => ({
-    document_id: doc.id, chunk_index: i, content: chunk,
-    token_count: Math.ceil(chunk.length / 4), embedding: JSON.stringify(embeddings[i]),
+    document_id: doc.id,
+    chunk_index: i,
+    content: `[${title}]\n\n${chunk}`,  // Store with title prefix
+    token_count: Math.ceil(chunk.length / 4),
+    embedding: JSON.stringify(embeddings[i]),
   }));
 
   const { error: chunkErr } = await supabase.from("kb_chunks").insert(rows);

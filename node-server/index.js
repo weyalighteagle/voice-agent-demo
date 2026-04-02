@@ -180,8 +180,36 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
 ---
 
-## TARİH FİLTRESİ
-Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. Bugünün tarihini referans al. Tarih belirtilmemişse parametreleri boş bırak.`;
+## KRİTİK SORGULAMA KURALLARI
+
+1. TARİH FİLTRESİ: Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. "Geçen toplantı" / "en son toplantı" → date_from: 14 gün önce, date_to: bugün. Tarih belirtilmemişse parametreleri boş bırak.
+
+2. TOPLANTI TÜRÜ EŞLEŞTİRME: Kullanıcı belirli bir toplantı türünden bahsettiğinde meeting_type parametresini MUTLAKA doldur:
+   - "yapay zeka takım toplantısı" / "yapay zeka toplantısı" / "AI toplantısı" / "haftalık toplantı" → meeting_type: "light_eagle_yapay_zeka_takim_toplantisi"
+   - "coherus toplantısı" → meeting_type: "coherus_toplanti"
+   - Kullanıcı sadece "geçen toplantı" veya "toplantı" diyorsa ve tür belirtmiyorsa → meeting_type KULLANMA, tüm toplantılarda ara.
+   - Hem meeting_type hem de date_from/date_to'yu birlikte kullan.
+
+3. ARAMA SORGUSU KALİTESİ: search_knowledge_base aracını çağırırken query parametresine kullanıcının asıl sorusunun KONUSUNU yaz, meta-açıklama yazma:
+   - YANLIŞ: query="gündem konuları tartışmalar kararlar" (bu her toplantıyla eşleşir, özgün değil)
+   - DOĞRU: query="yapay zeka takım toplantısı konuşulan konular kararlar"
+   - DOĞRU: query="Gülfem görev aksiyon atanan işler"
+   - Kişi-spesifik sorularda kişinin adını query'ye DAHİL ET.
+   - Görev/aksiyon sorularında "görev", "aksiyon", "yapılacak", "atanan iş" gibi kelimeleri kullan.
+
+4. GÖREV VE AKSİYON SORULARI: "Gülfem'in görevleri nelerdi?" gibi sorularda:
+   - category: "transcripts" kullan
+   - query'ye kişinin adını VE "görev aksiyon yapılacak atanan iş" kelimelerini ekle
+   - Sonuçlardan SADECE görev atama, aksiyon belirleme veya iş dağılımı içeren kısımları cevapla
+   - Başlığında "test" geçen toplantıları (örn. "KB Test", "Gülfem Solak test") görev kaynağı olarak KULLANMA — bunlar gerçek görev ataması içermez
+
+5. TEKRAR ARA: İlk aramada istediğin sonucu bulamazsan, farklı anahtar kelimelerle veya farklı parametrelerle tekrar ara. Tek bir aramada bulamazsan HEMEN vazgeçme.
+
+6. BAĞIMSIZ SORGULAMA: Her yeni soruyu bağımsız değerlendir. Önceki soruda bir kişiden (örn. "Gülfem", "Yiğit", "Onur") bahsedilmiş olsa bile:
+   - Yeni soruda "ekip", "takım", "herkes", "biz", "neler yapılıyor" gibi GENEL ifadeler varsa → search_knowledge_base sorgusuna önceki kişinin adını EKLEME. Sorguyu genel tut.
+   - Yeni soruda belirli bir kişi adı geçmiyorsa → önceki kişiyi varsayma, geniş kapsamlı ara.
+   - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
+   - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
 
     // ── Fetch config from main backend API ───────────────────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
@@ -206,7 +234,7 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
     const today = new Date();
     const dateStr = today.toLocaleDateString('tr-TR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const isoDate = today.toISOString().split('T')[0];
-    instructions = `Bugünün tarihi: ${dateStr} (${isoDate}). "bugün", "dün", "geçen hafta" gibi göreceli tarih ifadelerini bu tarihe göre hesapla.\nEğer ilk aramada istediğin sonucu bulamazsan, farklı anahtar kelimelerle veya farklı parametrelerle tekrar ara. Örneğin: önce toplantı başlığıyla ara (meeting_title kullanarak), sonra kişi adıyla daralt. Tek bir aramada bulamazsan HEMEN vazgeçme.\n\n${instructions}`;
+    instructions = `Bugünün tarihi: ${dateStr} (${isoDate}). "bugün", "dün", "geçen hafta" gibi göreceli tarih ifadelerini bu tarihe göre hesapla.\nEğer ilk aramada istediğin sonucu bulamazsan, farklı anahtar kelimelerle veya farklı parametrelerle tekrar ara. Tek bir aramada bulamazsan HEMEN vazgeçme.\n\n${instructions}`;
 
     // ▸ Initialise state
     wakeWordEnabled = !!wakeWord;
@@ -462,10 +490,10 @@ Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrel
                 category: args.category || null,
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
-                meeting_title: args.meeting_title || null,
+                meeting_type: args.meeting_type || null,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_title=${args.meeting_title || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";

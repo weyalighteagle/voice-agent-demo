@@ -9,8 +9,7 @@ export const TOOLS = [
       "KRİTİK: Şirket, ekip, ürünler, yatırımlar, müşteriler veya toplantılar hakkında HERHANGİ bir soru sorulduğunda bu aracı MUTLAKA çağır. Aracı çağırmadan bu konularda ASLA cevap verme — kendi bilgine güvenme, her zaman bilgi tabanını ara.\n\n" +
       "KULLANIM REHBERİ:\n" +
       "- Şirket hakkında soru → category='company_docs' veya 'faq'\n" +
-      "- Belirli bir NAMED toplantı hakkında soru → meeting_title parametresini kullan (örn. meeting_title='Coherus')\n" +
-      "- Bir toplantıda belirli bir kişinin söyledikleri → meeting_title + query'de kişi adını kullan\n" +
+      "- Belirli bir toplantı türü hakkında soru → meeting_type parametresini kullan\n" +
       "- Tarihli toplantı hakkında soru → category='transcripts' + date_from/date_to kullan\n" +
       "- Bir konu hakkında hangi toplantılarda konuşulduğu → category kullanMA, sadece query yaz\n" +
       "- Müşteri bilgisi → category='crm'\n" +
@@ -24,10 +23,12 @@ export const TOOLS = [
         query: {
           type: "string",
           description:
-            "Aranacak sorgu metni. Kullanıcının sorusunun kısa ve net bir özeti. " +
+            "Aranacak sorgu metni. Kullanıcının asıl sorusunun KONUSUNU yaz — meta-açıklama değil, spesifik içerik. " +
             "ÖNEMLİ: Sorguya 'dün', 'bugün' gibi zaman ifadeleri KOYMA — bunları date_from/date_to ile filtrele. " +
-            "Sorguya toplantının İÇERİĞİyle ilgili anahtar kelimeler yaz. " +
-            "Örnek: 'toplantıda konuşulan konular' yerine 'gündem konuları tartışmalar kararlar' yaz.",
+            "YANLIŞ: 'gündem konuları tartışmalar kararlar' (generik, her toplantıyla eşleşir). " +
+            "DOĞRU: 'yapay zeka takım toplantısı konuşulan konular kararlar'. " +
+            "DOĞRU: 'Gülfem görev aksiyon atanan işler'. " +
+            "Kişi-spesifik sorularda kişinin adını query'ye DAHİL ET.",
         },
         category: {
           type: "string",
@@ -38,13 +39,15 @@ export const TOOLS = [
             "Seçenekler: 'company_docs' → şirket dökümanları; 'faq' → ürün bilgisi; " +
             "'crm' → müşteri bilgileri; 'transcripts' → toplantı kayıtları.",
         },
-        meeting_title: {
+        meeting_type: {
           type: "string",
           description:
-            "Toplantı başlığı ile filtreleme. Kullanıcı belirli bir toplantıdan bahsettiğinde " +
-            "(örn. 'Coherus toplantısı', 'standup toplantısı') bu parametreyi kullan. " +
-            "Başlığın tam olarak eşleşmesi gerekmez, kısmi eşleşme yeterlidir. " +
-            "Örnek: meeting_title='Coherus' → 'Coherus Toplantı — 25 Mart 2026' başlıklı dokümanları bulur.",
+            "Toplantı türü filtresi (snake_case, Türkçe karaktersiz). Sadece category='transcripts' ile kullan. " +
+            "Kullanıcı belirli bir toplantı türünden bahsediyorsa MUTLAKA doldur. " +
+            "Eşleştirme tablosu: " +
+            "'yapay zeka takım toplantısı' / 'yapay zeka toplantısı' / 'AI toplantısı' / 'haftalık toplantı' → 'light_eagle_yapay_zeka_takim_toplantisi'. " +
+            "'coherus toplantısı' → 'coherus_toplanti'. " +
+            "Kullanıcı sadece 'geçen toplantı' veya 'toplantı' diyorsa ve tür belirtmiyorsa → bu parametreyi GÖNDERME.",
         },
         date_from: {
           type: "string",
@@ -62,7 +65,7 @@ export const TOOLS = [
             "Örnek: '2025-01-31T23:59:59Z'. Tarih belirtilmemişse bu parametreyi gönderme.",
         },
       },
-      required: ["query"],
+      required: ["query", "category"],
     },
   },
 ];
