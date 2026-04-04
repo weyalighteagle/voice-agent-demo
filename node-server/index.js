@@ -284,6 +284,15 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
 
+    // Send agent config (photo URL) to the client
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({
+        type: "agent.config",
+        photo_url: apiConfig?.photo_url || null,
+      }));
+      console.log(`[relay] Sent agent.config to client — photo_url=${apiConfig?.photo_url ? "set" : "none"}`);
+    }
+
     while (messageQueue.length > 0) {
       openaiWs.send(messageQueue.shift());
     }

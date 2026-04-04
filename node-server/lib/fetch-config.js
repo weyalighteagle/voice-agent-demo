@@ -25,6 +25,7 @@ export async function fetchVoiceAgentConfig() {
       voice: data.voice,
       language: data.language,
       wake_word: data.wake_word || null,   // ← EKLENDİ
+      photo_url: data.photo_url || null,
     };
   } catch (err) {
     console.error("[relay] Failed to fetch voice agent config:", err.message);

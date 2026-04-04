@@ -8,6 +8,7 @@ const BACKOFF = [1000, 2000, 4000, 8000, 30000];
 export default function App() {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [statusDetail, setStatusDetail] = useState("");
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -148,6 +149,15 @@ export default function App() {
       try {
         const msg = JSON.parse(event.data as string);
 
+        // ── Handle agent config from relay server ──────────────────
+        if (msg.type === "agent.config") {
+          if (msg.photo_url) {
+            setPhotoUrl(msg.photo_url);
+            console.log("[voice-agent] Received agent photo:", msg.photo_url);
+          }
+          return;  // Don't process further — this is not an OpenAI event
+        }
+
         switch (msg.type) {
           case "response.created": {
             isRespondingRef.current = true;
@@ -239,7 +249,20 @@ export default function App() {
   return (
     <div className="app-container">
       <div className="status-indicator">
-        <div className={dotClass} />
+        {/* Avatar or status dot */}
+        {photoUrl ? (
+          <div className="agent-avatar-wrapper">
+            <img
+              src={photoUrl}
+              alt="Voice Agent"
+              className="agent-avatar"
+            />
+            {/* Overlay status ring on the avatar */}
+            <div className={`avatar-status-ring ${status}`} />
+          </div>
+        ) : (
+          <div className={dotClass} />
+        )}
         <div className="status-text">
           <div className="status-label">{labels[status]}</div>
           <div className="status-url">{statusDetail}</div>
