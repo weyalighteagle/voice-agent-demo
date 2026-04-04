@@ -237,6 +237,20 @@ export default function App() {
   }, [connect]);
 
   // ── Render ────────────────────────────────────────────────────────────────
+  if (photoUrl) {
+    // Full screen photo mode — no text, no status indicators
+    return (
+      <div className="fullscreen-photo-container">
+        <img
+          src={photoUrl}
+          alt="Voice Agent"
+          className="fullscreen-photo"
+        />
+      </div>
+    );
+  }
+
+  // Fallback: no photo uploaded — show original status indicator
   const dotClass = `status-dot ${status}`;
   const labels: Record<ConnectionStatus, string> = {
     idle: "Initializing...",
@@ -249,20 +263,7 @@ export default function App() {
   return (
     <div className="app-container">
       <div className="status-indicator">
-        {/* Avatar or status dot */}
-        {photoUrl ? (
-          <div className="agent-avatar-wrapper">
-            <img
-              src={photoUrl}
-              alt="Voice Agent"
-              className="agent-avatar"
-            />
-            {/* Overlay status ring on the avatar */}
-            <div className={`avatar-status-ring ${status}`} />
-          </div>
-        ) : (
-          <div className={dotClass} />
-        )}
+        <div className={dotClass} />
         <div className="status-text">
           <div className="status-label">{labels[status]}</div>
           <div className="status-url">{statusDetail}</div>
