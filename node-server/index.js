@@ -21,11 +21,84 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// ── Hallucination blocklist ───────────────────────────────────────────────────
+// Known Whisper hallucinations on silence/noise for Turkish & English
+const HALLUCINATION_BLOCKLIST = new Set([
+  "altyazı",
+  "alt yazı",
+  "altyazılar",
+  "abone ol",
+  "abone olun",
+  "abone olmayı unutmayın",
+  "beğen ve abone ol",
+  "beğenmeyi ve abone olmayı unutmayın",
+  "izlediğiniz için teşekkürler",
+  "izlediğiniz için teşekkür ederim",
+  "seyrettiğiniz için teşekkürler",
+  "bir sonraki videoda görüşmek üzere",
+  "bir sonraki videoda görüşürüz",
+  "türkçe altyazı",
+  "altyazı çevirisi",
+  "çeviri",
+  "thanks for watching",
+  "thank you for watching",
+  "subscribe",
+  "like and subscribe",
+  "please subscribe",
+  "subtitles by the amara.org community",
+  "subtitles by",
+  "transcribed by",
+  "transcript by",
+  "thank you",
+  "teşekkürler",
+  "teşekkür ederim",
+]);
+
+// Patterns that indicate hallucination even as substring
+const HALLUCINATION_PATTERNS = [
+  /altyazı/i,
+  /abone ol/i,
+  /subscribe/i,
+  /amara\.org/i,
+  /subtitles?\s+by/i,
+  /transcri(bed|pt)\s+by/i,
+  /izlediğiniz için teşekkür/i,
+  /seyrettiğiniz için/i,
+  /bir sonraki video/i,
+  /beğenmeyi.*abone/i,
+];
+
+/**
+ * Check if a transcript is a known Whisper hallucination.
+ * Returns true if the transcript should be discarded.
+ */
+function isHallucination(transcript) {
+  const trimmed = transcript.trim();
+
+  // Too short to be real speech (1-2 chars)
+  if (trimmed.length < 2) return true;
+
+  // Exact match against blocklist (case-insensitive, stripped punctuation)
+  const normalized = trimmed.toLowerCase().replace(/[.,!?…:;'""\-]+$/g, "").trim();
+  if (HALLUCINATION_BLOCKLIST.has(normalized)) return true;
+
+  // Pattern match
+  if (HALLUCINATION_PATTERNS.some(p => p.test(trimmed))) return true;
+
+  return false;
+}
+
 // ── Transcription prompt builder ──────────────────────────────────────────────
+// CHANGED: Removed instructional sentences — Whisper ignores them and they
+// become hallucination material. Only proper nouns remain as vocabulary hints.
 function buildTranscriptionPrompt(language, wakeWord) {
-  // SADECE özel isimler — talimat cümlesi yok (Whisper talimatlara uymaz, kelimeleri "duyar")
-  const properNouns = "Weya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
-  return properNouns;
+  const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
+
+  let prompt = properNouns;
+  if (wakeWord) {
+    prompt += `, ${wakeWord}`;
+  }
+  return prompt;
 }
 
 // ── Knowledge Base ────────────────────────────────────────────────────────────
@@ -88,11 +161,11 @@ wss.on("connection", (clientWs, req) => {
   // ══════════════════════════════════════════════════════════════════════════
   let wakeWord = null;
   let wakeWordEnabled = false;
-  let isAwake = false;
-  let pendingManualResponse = false;
+  let isAwake = false;              // true = wake word detected, bot may speak
+  let pendingManualResponse = false; // true = we sent response.create, next response.created is ours
   let transcriptionPrompt = "";
-  let activeResponseId = null;
-  let awaitingToolFollowUp = false;
+  let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
+  let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -228,7 +301,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
     }
 
-    // ── Sadece özel isimler — talimat cümlesi YOK ────────────────────────
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
     const sessionUpdate = {
@@ -241,6 +313,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
+            // ADDED: noise reduction for meeting room (far-field microphone)
+            noise_reduction: {
+              type: "far_field",
+            },
             transcription: {
               model: "whisper-1",
               language,
@@ -248,9 +324,12 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.65,        // ← 0.5'ten yükseltildi (yanlış tetiklenme azalır)
-              prefix_padding_ms: 500,
-              silence_duration_ms: 800, // ← 600'den artırıldı (sessizlikte halüsinasyon azalır)
+              // CHANGED: 0.5 → 0.6 — reduces false triggers on background noise
+              threshold: 0.6,
+              // CHANGED: 500 → 300 — less silent audio captured before speech
+              prefix_padding_ms: 300,
+              // CHANGED: 600 → 800 — short pauses won't be treated as end-of-speech
+              silence_duration_ms: 800,
             },
           },
           output: {
@@ -305,7 +384,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       }
 
       // ════════════════════════════════════════════════════════════════════
-      // ▸ TRANSCRIPT — wake word detection + hallucination guards
+      // ▸ TRANSCRIPT — hallucination filter + wake word detection
       // ════════════════════════════════════════════════════════════════════
       if (msg.type === "input_audio_buffer.speech_started") {
         console.log(`[vad] Speech started`);
@@ -320,14 +399,21 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] Transcript: "${transcript}"`);
         logState("transcript");
 
-        // ── Guard: Prompt echo (ASR kendi promptunu transcript olarak üretiyor)
-        // Eşik 0.3'e düşürüldü — daha erken bloklama için
-        if (transcriptionPrompt && transcript.length > 20) {
+        // ── Guard 1: Hallucination blocklist (ADDED)
+        if (isHallucination(transcript)) {
+          console.log(`[relay] HALLUCINATION BLOCKED — blocklist match: "${transcript}"`);
+          // Still forward to client so they see what was filtered
+          if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
+          return;
+        }
+
+        // ── Guard 2: Prompt echo (ASR outputs its own prompt as transcript)
+        if (transcriptionPrompt && transcript.length > 40) {
           const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
           const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
           const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
           const matchCount = promptWords.filter(w => normT.includes(w)).length;
-          if (promptWords.length > 0 && matchCount / promptWords.length > 0.3) {
+          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
             console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
             if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
             return;
@@ -339,6 +425,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           const wakeMatch = containsWakeWord(transcript, wakeWord);
           console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
           if (wakeMatch) {
+            // Check if there's meaningful content AFTER the wake word.
             const remainder = transcript.toLowerCase()
               .replace(/hey/gi, "")
               .replace(/weya/gi, "")
@@ -349,17 +436,22 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               .trim();
 
             if (remainder.length >= 3) {
+              // Wake word + real content → activate immediately
               console.log(`[relay] ★ WAKE WORD + CONTENT detected: "${transcript}" (remainder="${remainder}")`);
               isAwake = true;
               pendingManualResponse = true;
               logState("activated-with-content");
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             } else {
+              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
               console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
               logState("wake-only-ignored");
             }
+          } else {
+            // No wake word → ignore
           }
         }
+        // Always forward transcript to client
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -371,12 +463,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
+          // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
         }
 
+        // Legitimate response — accept and track
         activeResponseId = respId;
         if (pendingManualResponse) {
           console.log(`[relay] Consuming pendingManualResponse for ${respId}`);
