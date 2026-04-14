@@ -23,29 +23,9 @@ if (!OPENAI_API_KEY) {
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
 function buildTranscriptionPrompt(language, wakeWord) {
-  const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
-
-  if (language === "tr") {
-    let prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
-    prompt += ` Özel isimler ve sık geçen kelimeler: ${properNouns}.`;
-    if (wakeWord) {
-      prompt += ` "${wakeWord}" bir isimdir, bu şekilde yazılmalıdır.`;
-      prompt += ` Sessizlik veya belirsiz ses varsa boş bırak, olmayan kelimeleri üretme.`;
-    }
-    return prompt;
-  }
-
-  if (language === "en") {
-    let prompt = "This is an English meeting recording. Transcribe only in English.";
-    prompt += ` Proper nouns and common terms: ${properNouns}.`;
-    if (wakeWord) {
-      prompt += ` "${wakeWord}" is a name, spell it as shown.`;
-      prompt += ` If there is silence or unclear audio, leave it empty. Do not hallucinate words.`;
-    }
-    return prompt;
-  }
-
-  return "";
+  // SADECE özel isimler — talimat cümlesi yok (Whisper talimatlara uymaz, kelimeleri "duyar")
+  const properNouns = "Weya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
+  return properNouns;
 }
 
 // ── Knowledge Base ────────────────────────────────────────────────────────────
@@ -108,11 +88,11 @@ wss.on("connection", (clientWs, req) => {
   // ══════════════════════════════════════════════════════════════════════════
   let wakeWord = null;
   let wakeWordEnabled = false;
-  let isAwake = false;              // true = wake word detected, bot may speak
-  let pendingManualResponse = false; // true = we sent response.create, next response.created is ours
+  let isAwake = false;
+  let pendingManualResponse = false;
   let transcriptionPrompt = "";
-  let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
-  let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
+  let activeResponseId = null;
+  let awaitingToolFollowUp = false;
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -248,6 +228,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
     }
 
+    // ── Sadece özel isimler — talimat cümlesi YOK ────────────────────────
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
     const sessionUpdate = {
@@ -267,9 +248,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
+              threshold: 0.65,        // ← 0.5'ten yükseltildi (yanlış tetiklenme azalır)
               prefix_padding_ms: 500,
-              silence_duration_ms: 600,
+              silence_duration_ms: 800, // ← 600'den artırıldı (sessizlikte halüsinasyon azalır)
             },
           },
           output: {
@@ -339,13 +320,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] Transcript: "${transcript}"`);
         logState("transcript");
 
-        // ── Guard: Prompt echo (ASR outputs its own prompt as transcript)
-        if (transcriptionPrompt && transcript.length > 40) {
+        // ── Guard: Prompt echo (ASR kendi promptunu transcript olarak üretiyor)
+        // Eşik 0.3'e düşürüldü — daha erken bloklama için
+        if (transcriptionPrompt && transcript.length > 20) {
           const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
           const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
           const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
           const matchCount = promptWords.filter(w => normT.includes(w)).length;
-          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
+          if (promptWords.length > 0 && matchCount / promptWords.length > 0.3) {
             console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
             if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
             return;
@@ -357,7 +339,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           const wakeMatch = containsWakeWord(transcript, wakeWord);
           console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
           if (wakeMatch) {
-            // Check if there's meaningful content AFTER the wake word.
             const remainder = transcript.toLowerCase()
               .replace(/hey/gi, "")
               .replace(/weya/gi, "")
@@ -368,22 +349,17 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               .trim();
 
             if (remainder.length >= 3) {
-              // Wake word + real content → activate immediately
               console.log(`[relay] ★ WAKE WORD + CONTENT detected: "${transcript}" (remainder="${remainder}")`);
               isAwake = true;
               pendingManualResponse = true;
               logState("activated-with-content");
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             } else {
-              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
               console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
               logState("wake-only-ignored");
             }
-          } else {
-            // No wake word → ignore
           }
         }
-        // Always forward transcript to client
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -395,14 +371,12 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
         }
 
-        // Legitimate response — accept and track
         activeResponseId = respId;
         if (pendingManualResponse) {
           console.log(`[relay] Consuming pendingManualResponse for ${respId}`);
