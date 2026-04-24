@@ -89,14 +89,18 @@ function isHallucination(transcript) {
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
-// CHANGED: Removed instructional sentences — Whisper ignores them and they
-// become hallucination material. Only proper nouns remain as vocabulary hints.
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
 
-  let prompt = properNouns;
+  let prompt;
+  if (language === "tr") {
+    prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
+  } else {
+    prompt = "This meeting may be conducted in Turkish or English. Transcribe in whichever language is being spoken — do not force a single language.";
+  }
+  prompt += ` Proper nouns: ${properNouns}.`;
   if (wakeWord) {
-    prompt += `, ${wakeWord}`;
+    prompt += ` "${wakeWord}" is a trigger word — always transcribe it exactly as "${wakeWord}".`;
   }
   return prompt;
 }
@@ -272,7 +276,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
-      language = apiConfig.language || "tr";
+      language = apiConfig.language ?? "en";
+      console.log(`[relay] Language from config: "${apiConfig.language}" → resolved: "${language}"`);
       wakeWord = apiConfig.wake_word || null;
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
@@ -318,9 +323,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               type: "far_field",
             },
             transcription: {
-              model: "whisper-1",
-              language,
-              prompt: transcriptionPrompt,
+              model: "gpt-4o-mini-transcribe",
+              ...(language === "tr" ? { language: "tr" } : {}),
+              prompt: buildTranscriptionPrompt(language, wakeWord),
             },
             turn_detection: {
               type: "server_vad",
