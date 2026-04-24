@@ -25,27 +25,17 @@ if (!OPENAI_API_KEY) {
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
 
+  let prompt;
   if (language === "tr") {
-    let prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
-    prompt += ` Özel isimler ve sık geçen kelimeler: ${properNouns}.`;
-    if (wakeWord) {
-      prompt += ` "${wakeWord}" bir isimdir, bu şekilde yazılmalıdır.`;
-      prompt += ` Sessizlik veya belirsiz ses varsa boş bırak, olmayan kelimeleri üretme.`;
-    }
-    return prompt;
+    prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
+  } else {
+    prompt = "This meeting may be conducted in Turkish or English. Transcribe in whichever language is being spoken — do not force a single language.";
   }
-
-  if (language === "en") {
-    let prompt = "This is an English meeting recording. Transcribe only in English.";
-    prompt += ` Proper nouns and common terms: ${properNouns}.`;
-    if (wakeWord) {
-      prompt += ` "${wakeWord}" is a name, spell it as shown.`;
-      prompt += ` If there is silence or unclear audio, leave it empty. Do not hallucinate words.`;
-    }
-    return prompt;
+  prompt += ` Proper nouns: ${properNouns}.`;
+  if (wakeWord) {
+    prompt += ` "${wakeWord}" is a trigger word — always transcribe it exactly as "${wakeWord}".`;
   }
-
-  return "";
+  return prompt;
 }
 
 // ── Knowledge Base ────────────────────────────────────────────────────────────
@@ -219,7 +209,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
-      language = apiConfig.language || "tr";
+      language = apiConfig.language ?? "en";
+      console.log(`[relay] Language from config: "${apiConfig.language}" → resolved: "${language}"`);
       wakeWord = apiConfig.wake_word || null;
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
@@ -261,9 +252,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           input: {
             format: { type: "audio/pcm", rate: 24000 },
             transcription: {
-              model: "whisper-1",
-              language,
-              prompt: transcriptionPrompt,
+              model: "gpt-4o-mini-transcribe",
+              ...(language === "tr" ? { language: "tr" } : {}),
+              prompt: buildTranscriptionPrompt(language, wakeWord),
             },
             turn_detection: {
               type: "server_vad",
