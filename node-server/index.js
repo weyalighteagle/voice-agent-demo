@@ -10,7 +10,8 @@ dotenv.config();
 
 // ── Env & config ──────────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const BACKEND_API_URL = process.env.BACKEND_API_URL;
+const BACKEND_API_URL = process.env.BACKEND_API_URL || "";
+const BACKEND_API_KEY = process.env.BACKEND_API_KEY || "";
 const PORT = process.env.PORT ?? 3000;
 
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
@@ -123,6 +124,28 @@ const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.done",
 ]);
 
+// ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
+async function getAllowedTagIds(botId) {
+  if (!botId || !BACKEND_API_URL) return null;
+  try {
+    const res = await fetch(
+      `${BACKEND_API_URL}/api/meetings/${botId}/allowed-tags`,
+      {
+        headers: {
+          "x-api-key": BACKEND_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.tag_ids ?? null; // null = no filter
+  } catch (e) {
+    console.error("[relay] getAllowedTagIds error:", e);
+    return null;
+  }
+}
+
 // ── HTTP health endpoint ──────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
@@ -150,7 +173,10 @@ wss.on("connection", (clientWs, req) => {
     return;
   }
 
-  console.log("[relay] Client connected — opening OpenAI Realtime connection");
+  const botId = url.searchParams.get("botId") || null;
+  console.log(`[relay] Client connected — botId=${botId}`);
+
+  let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -268,8 +294,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
 
-    // ── Fetch config from main backend API ───────────────────────────────────
+    // ── Fetch config and tag filter from main backend API ────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
+    allowedTagIds = await getAllowedTagIds(botId);
+    console.log(`[relay] allowedTagIds for bot ${botId}:`, allowedTagIds);
 
     let instructions, voice, language;
     if (apiConfig) {
@@ -573,9 +601,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
+                allowedTagIds,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -658,6 +687,7 @@ httpServer.listen(PORT, () => {
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
     BACKEND_API_URL: process.env.BACKEND_API_URL ? "set" : "MISSING",
+    BACKEND_API_KEY: process.env.BACKEND_API_KEY ? "set" : "MISSING",
     KB_ENABLED,
   });
 });
