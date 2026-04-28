@@ -2,6 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import websockets
@@ -26,6 +29,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 PORT = int(os.getenv("PORT", 3000))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "")
+BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "")
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY must be set in .env file")
@@ -147,6 +152,41 @@ def build_instructions() -> str:
 
 
 # ─── Knowledge Base Search ────────────────────────────────────────────────────
+async def get_allowed_tag_ids(meeting_token: str | None) -> list | None:
+    """Resolve a meetingToken to allowed KB tag IDs with up to 3 attempts.
+
+    The tag assignment happens shortly after bot creation so the relay may
+    connect before the tag is written — retry a couple of times to allow
+    the frontend's PUT /api/meetings/:botId/tags call to land.
+    """
+    if not meeting_token or not BACKEND_API_URL:
+        return None
+
+    url = f"{BACKEND_API_URL}/api/relay/allowed-tags?token={meeting_token}"
+
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(url, headers={"x-api-key": BACKEND_API_KEY})
+
+            def _fetch():
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return json.loads(resp.read().decode())
+
+            data = await asyncio.to_thread(_fetch)
+            if data.get("tag_ids") is not None:
+                logger.info(f"[relay] allowedTagIds resolved on attempt {attempt}")
+                return data["tag_ids"]
+            if attempt < 3:
+                logger.info(f"[relay] allowedTagIds null on attempt {attempt}, retrying in 2s...")
+                await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"[relay] get_allowed_tag_ids error: {e}")
+            return None
+
+    logger.info("[relay] allowedTagIds still null after 3 attempts — no filter applied")
+    return None
+
+
 async def search_knowledge_base(
     query: str,
     category: str | None = None,
@@ -154,6 +194,7 @@ async def search_knowledge_base(
     date_to: str | None = None,
     meeting_title: str | None = None,
     meeting_type: str | None = None,
+    allowed_tag_ids: list | None = None,
 ) -> str:
     """Search the KB via Supabase RPC and return formatted results."""
     if not KB_ENABLED or not supabase or not openai_client:
@@ -181,6 +222,7 @@ async def search_knowledge_base(
             "filter_date_to": date_to,
             "filter_meeting_type": meeting_type,
             "filter_meeting_title": meeting_title,
+            "p_allowed_tag_ids": allowed_tag_ids,
         }
         result = supabase.rpc("search_knowledge_base", rpc_params).execute()
 
@@ -227,7 +269,7 @@ async def search_knowledge_base(
 
 
 # ─── Handle tool calls from OpenAI ───────────────────────────────────────────
-async def handle_tool_call(openai_ws, msg: dict):
+async def handle_tool_call(openai_ws, msg: dict, allowed_tag_ids: list | None = None):
     """Process a completed function call and send the result back to OpenAI."""
     call_id = msg.get("call_id")
     name = msg.get("name")
@@ -247,6 +289,7 @@ async def handle_tool_call(openai_ws, msg: dict):
                 date_to=args.get("date_to"),
                 meeting_title=args.get("meeting_title"),
                 meeting_type=args.get("meeting_type"),
+                allowed_tag_ids=allowed_tag_ids,
             )
         except Exception as e:
             logger.error(f"[relay] KB search error: {e}")
@@ -342,6 +385,14 @@ class WebSocketRelay:
             await websocket.close(1008, "Invalid path")
             return
 
+        parsed = urlparse(path)
+        params = parse_qs(parsed.query)
+        meeting_token = params.get("meetingToken", [None])[0]
+        logger.info(f"[relay] Connection: meetingToken={meeting_token}")
+
+        allowed_tag_ids = await get_allowed_tag_ids(meeting_token)
+        logger.info(f"[relay] allowedTagIds for token {meeting_token}: {allowed_tag_ids}")
+
         logger.info(f"Browser connected from {websocket.remote_address}")
         self.message_queues[websocket] = []
         openai_ws = None
@@ -390,7 +441,7 @@ class WebSocketRelay:
 
                             # ── Intercept completed tool calls ──
                             if msg_type == "response.function_call_arguments.done":
-                                await handle_tool_call(openai_ws, msg)
+                                await handle_tool_call(openai_ws, msg, allowed_tag_ids=allowed_tag_ids)
                                 continue  # Don't forward to client
 
                             # ── Suppress noisy tool-call events ──
