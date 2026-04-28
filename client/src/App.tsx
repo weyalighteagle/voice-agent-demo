@@ -23,6 +23,7 @@ export default function App() {
 
   const params = new URLSearchParams(window.location.search);
   const relayUrl = params.get("wss");
+  const botId = params.get("botId");
 
   // ── Audio playback ────────────────────────────────────────────────────────
   const playNextChunk = useCallback(async () => {
@@ -94,7 +95,8 @@ export default function App() {
 
     audioCtxRef.current = new AudioContext({ sampleRate: 24000 });
 
-    const ws = new WebSocket(relayUrl);
+    const wsUrl = botId ? `${relayUrl}?botId=${botId}` : relayUrl!;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     ws.binaryType = "arraybuffer";
 
