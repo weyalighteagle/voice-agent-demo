@@ -4,7 +4,7 @@ import { createEmbedding } from "./embeddings.js";
 const KB_MATCH_THRESHOLD = parseFloat(process.env.KB_MATCH_THRESHOLD || "0.3");
 const KB_MATCH_COUNT = parseInt(process.env.KB_MATCH_COUNT || "5", 10);
 
-export async function searchKnowledgeBase(query, { category = null, date_from = null, date_to = null, meeting_type = null } = {}) {
+export async function searchKnowledgeBase(query, { category = null, date_from = null, date_to = null, meeting_type = null, allowedTagIds = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -37,6 +37,8 @@ export async function searchKnowledgeBase(query, { category = null, date_from = 
     filter_date_from: date_from || null,
     filter_date_to: date_to || null,
     filter_meeting_type: meeting_type || null,
+    p_org_id: null,
+    p_allowed_tag_ids: allowedTagIds || null,
   };
 
   const { data, error } = await supabase.rpc(
