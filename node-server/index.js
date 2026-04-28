@@ -125,21 +125,18 @@ const SUPPRESS_EVENTS = new Set([
 ]);
 
 // ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
-async function getAllowedTagIds(botId) {
-  if (!botId || !BACKEND_API_URL) return null;
+async function getAllowedTagIds(meetingToken) {
+  if (!meetingToken || !BACKEND_API_URL) return null;
   try {
     const res = await fetch(
-      `${BACKEND_API_URL}/api/meetings/${botId}/allowed-tags`,
+      `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
       {
-        headers: {
-          "x-api-key": BACKEND_API_KEY,
-          "Content-Type": "application/json",
-        },
+        headers: { "x-api-key": BACKEND_API_KEY },
       }
     );
     if (!res.ok) return null;
     const data = await res.json();
-    return data.tag_ids ?? null; // null = no filter
+    return data.tag_ids;
   } catch (e) {
     console.error("[relay] getAllowedTagIds error:", e);
     return null;
@@ -173,8 +170,8 @@ wss.on("connection", (clientWs, req) => {
     return;
   }
 
-  const botId = url.searchParams.get("botId") || null;
-  console.log(`[relay] Client connected — botId=${botId}`);
+  const meetingToken = url.searchParams.get("meetingToken") || null;
+  console.log(`[relay] Connection: meetingToken=${meetingToken}`);
 
   let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
 
@@ -296,8 +293,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
     // ── Fetch config and tag filter from main backend API ────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
-    allowedTagIds = await getAllowedTagIds(botId);
-    console.log(`[relay] allowedTagIds for bot ${botId}:`, allowedTagIds);
+    allowedTagIds = await getAllowedTagIds(meetingToken);
+    console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
 
     let instructions, voice, language;
     if (apiConfig) {
