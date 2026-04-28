@@ -127,20 +127,32 @@ const SUPPRESS_EVENTS = new Set([
 // ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
 async function getAllowedTagIds(meetingToken) {
   if (!meetingToken || !BACKEND_API_URL) return null;
-  try {
-    const res = await fetch(
-      `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
-      {
-        headers: { "x-api-key": BACKEND_API_KEY },
+
+  // Retry up to 3 times with 2s delay — the tag assignment from the frontend's
+  // PUT /api/meetings/:botId/tags call may arrive slightly after the relay connects.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(
+        `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
+        { headers: { "x-api-key": BACKEND_API_KEY } }
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.tag_ids !== null) {
+        console.log(`[relay] allowedTagIds resolved on attempt ${attempt}`);
+        return data.tag_ids;
       }
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.tag_ids;
-  } catch (e) {
-    console.error("[relay] getAllowedTagIds error:", e);
-    return null;
+      if (attempt < 3) {
+        console.log(`[relay] allowedTagIds null on attempt ${attempt}, retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } catch (e) {
+      console.error("[relay] getAllowedTagIds error:", e);
+      return null;
+    }
   }
+  console.log(`[relay] allowedTagIds still null after 3 attempts — no filter applied`);
+  return null;
 }
 
 // ── HTTP health endpoint ──────────────────────────────────────────────────────
