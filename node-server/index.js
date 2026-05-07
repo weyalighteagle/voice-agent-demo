@@ -89,6 +89,11 @@ function isHallucination(transcript) {
   return false;
 }
 
+// Follow-up window after a wake-only utterance ("Hey Veya." with no question content).
+// Bridges the VAD-induced gap between the wake word and the user's actual question.
+// Sized for ~3.5s natural pause + 500ms VAD/network buffer.
+const FOLLOW_UP_WINDOW_MS = 4000;
+
 // ── Transcription prompt builder ──────────────────────────────────────────────
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
@@ -205,6 +210,7 @@ wss.on("connection", (clientWs, req) => {
   let transcriptionPrompt = "";
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
+  let followUpTimer = null;
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -485,9 +491,21 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               logState("activated-with-content");
               openaiWs.send(JSON.stringify({ type: "response.create" }));
             } else {
-              // Wake word alone (e.g. "Hey Weya.") → ignore, do not activate
-              console.log(`[relay] WAKE WORD ONLY (no content): "${transcript}" — ignoring, no follow-up window`);
-              logState("wake-only-ignored");
+              // Wake word alone → open follow-up window; next utterance is treated as the question
+              if (followUpTimer) clearTimeout(followUpTimer);
+              isAwake = true;
+              followUpTimer = setTimeout(() => {
+                followUpTimer = null;
+                // Only sleep if we're truly idle. If a response is in-flight or a tool follow-up
+                // is pending, the existing response.done handler will manage isAwake.
+                if (isAwake && !activeResponseId && !pendingManualResponse && !awaitingToolFollowUp) {
+                  isAwake = false;
+                  console.log(`[relay] follow-up window expired (${FOLLOW_UP_WINDOW_MS}ms) — going back to sleep`);
+                  logState("follow-up-expired");
+                }
+              }, FOLLOW_UP_WINDOW_MS);
+              console.log(`[relay] WAKE WORD ONLY — opening ${FOLLOW_UP_WINDOW_MS}ms follow-up window: "${transcript}"`);
+              logState("wake-only-window-open");
             }
           } else {
             // No wake word → ignore
@@ -513,6 +531,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         }
 
         // Legitimate response — accept and track
+        if (followUpTimer) {
+          clearTimeout(followUpTimer);
+          followUpTimer = null;
+          console.log(`[relay] follow-up arrived — closing window early`);
+        }
         activeResponseId = respId;
         if (pendingManualResponse) {
           console.log(`[relay] Consuming pendingManualResponse for ${respId}`);
@@ -555,9 +578,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             } else if (awaitingToolFollowUp) {
               awaitingToolFollowUp = false;
               isAwake = false;
+              if (followUpTimer) { clearTimeout(followUpTimer); followUpTimer = null; }
               console.log(`[relay] TOOL FOLLOW-UP completed — going to sleep`);
             } else {
               isAwake = false;
+              if (followUpTimer) { clearTimeout(followUpTimer); followUpTimer = null; }
               console.log(`[relay] NORMAL response completed — going to sleep`);
             }
           } else if (status === "cancelled") {
@@ -673,6 +698,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   });
 
   clientWs.on("close", () => {
+    if (followUpTimer) { clearTimeout(followUpTimer); followUpTimer = null; }
     console.log("[relay] Client disconnected — closing OpenAI connection");
     logState("client-disconnect");
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
