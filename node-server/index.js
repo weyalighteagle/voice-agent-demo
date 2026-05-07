@@ -435,6 +435,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       // ▸ TRANSCRIPT — hallucination filter + wake word detection
       // ════════════════════════════════════════════════════════════════════
       if (msg.type === "input_audio_buffer.speech_started") {
+        if (followUpTimer) {
+          clearTimeout(followUpTimer);
+          followUpTimer = null;
+          console.log('[relay] speech detected during follow-up window — timer cancelled, keeping awake');
+        }
         console.log(`[vad] Speech started`);
         logState("speech-start");
       }
