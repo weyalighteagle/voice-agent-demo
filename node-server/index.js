@@ -193,6 +193,9 @@ wss.on("connection", (clientWs, req) => {
     },
   });
 
+  let openaiReconnecting = false;   // true while a reconnect attempt is in progress
+  let clientAlive = true;           // false after clientWs closes — prevents reconnect
+  let keepaliveTimer = null;        // holds the setInterval reference for the keepalive ping
   const messageQueue = [];
   let sessionReady = false;   // true after session.updated received
 
@@ -206,6 +209,7 @@ wss.on("connection", (clientWs, req) => {
   let transcriptionPrompt = "";
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
+  let sessionUpdate = null;         // holds session config for reconnect
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -349,7 +353,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
-    const sessionUpdate = {
+    sessionUpdate = {
       type: "session.update",
       session: {
         type: "realtime",
@@ -389,6 +393,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     console.log("[relay] Sending session.update:", JSON.stringify(sessionUpdate, null, 2));
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
+
+    // ── Keepalive: send a ping every 20s to prevent OpenAI idle timeout ──────
+    keepaliveTimer = setInterval(() => {
+      if (openaiWs.readyState === WebSocket.OPEN) {
+        openaiWs.ping();
+        console.log("[relay] Keepalive ping sent to OpenAI");
+      }
+    }, 20000);
 
     // Send agent config (photo URL) to the client
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -663,7 +675,20 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   // ── Connection lifecycle ───────────────────────────────────────────────────
   openaiWs.on("close", (code, reason) => {
     console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
-    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+    clearInterval(keepaliveTimer);
+
+    // If client is gone, nothing to reconnect for
+    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
+      console.log("[relay] Client already gone — not reconnecting");
+      return;
+    }
+
+    // OpenAI dropped us (e.g. ~30 min session limit) — attempt one reconnect
+    if (!openaiReconnecting) {
+      openaiReconnecting = true;
+      console.log("[relay] OpenAI connection dropped — attempting reconnect in 1s");
+      setTimeout(() => reconnectToOpenAI(), 1000);
+    }
   });
 
   openaiWs.on("error", (err) => {
@@ -682,6 +707,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   clientWs.on("close", () => {
     console.log("[relay] Client disconnected — closing OpenAI connection");
     logState("client-disconnect");
+    clientAlive = false;
+    clearInterval(keepaliveTimer);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 
@@ -689,6 +716,78 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     console.error("[relay] Client WebSocket error:", err.message);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
+
+  // ── Reconnect to OpenAI after unexpected close ────────────────────────────
+  function reconnectToOpenAI() {
+    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
+      console.log("[relay] Reconnect aborted — client gone");
+      openaiReconnecting = false;
+      return;
+    }
+
+    console.log("[relay] Reconnecting to OpenAI Realtime API...");
+
+    // Reset session state so the new session starts clean
+    sessionReady = false;
+    isAwake = false;
+    pendingManualResponse = false;
+    awaitingToolFollowUp = false;
+    activeResponseId = null;
+
+    const newOpenaiWs = new WebSocket(OPENAI_REALTIME_URL, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+    });
+
+    newOpenaiWs.on("open", () => {
+      console.log("[relay] Reconnected to OpenAI — re-sending session.update");
+      openaiReconnecting = false;
+
+      // Re-send session.update with the same config (already in closure scope)
+      newOpenaiWs.send(JSON.stringify(sessionUpdate));
+
+      // Restart keepalive
+      keepaliveTimer = setInterval(() => {
+        if (newOpenaiWs.readyState === WebSocket.OPEN) {
+          newOpenaiWs.ping();
+          console.log("[relay] Keepalive ping sent to OpenAI (reconnected session)");
+        }
+      }, 20000);
+    });
+
+    newOpenaiWs.on("message", async (data) => {
+      // Forward OpenAI messages to client using the same handler logic
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data.toString());
+      }
+      // Handle session.updated to mark session ready after reconnect
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "session.updated" && !sessionReady) {
+          sessionReady = true;
+          console.log("[relay] Reconnected session ready");
+        }
+      } catch {}
+    });
+
+    newOpenaiWs.on("close", (code, reason) => {
+      console.log("[relay] Reconnected OpenAI WS closed:", { code, reason: reason?.toString() });
+      clearInterval(keepaliveTimer);
+      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
+        console.log("[relay] Second OpenAI close — closing client");
+        clientWs.close();
+      }
+    });
+
+    newOpenaiWs.on("error", (err) => {
+      console.error("[relay] Reconnected OpenAI WS error:", err.message);
+      openaiReconnecting = false;
+      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close();
+      }
+    });
+  }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
