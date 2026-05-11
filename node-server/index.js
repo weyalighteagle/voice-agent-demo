@@ -194,6 +194,7 @@ wss.on("connection", (clientWs, req) => {
   });
 
   const messageQueue = [];
+  let sessionReady = false;   // true after session.updated received
 
   // ══════════════════════════════════════════════════════════════════════════
   // ▸ WAKE WORD — per-connection state
@@ -304,8 +305,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
 
     // ── Fetch config and tag filter from main backend API ────────────────────
-    const apiConfig = await fetchVoiceAgentConfig();
-    allowedTagIds = await getAllowedTagIds(meetingToken);
+    const [apiConfig, resolvedTagIds] = await Promise.all([
+      fetchVoiceAgentConfig(),
+      getAllowedTagIds(meetingToken),
+    ]);
+    allowedTagIds = resolvedTagIds;
     console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
 
     let instructions, voice, language;
@@ -395,9 +399,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       console.log(`[relay] Sent agent.config to client — photo_url=${apiConfig?.photo_url ? "set" : "none"}`);
     }
 
-    while (messageQueue.length > 0) {
-      openaiWs.send(messageQueue.shift());
-    }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -421,8 +422,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log("[relay] Session created:", msg.session?.id);
       }
       if (msg.type === "session.updated") {
-        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice,
-          "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+        if (!sessionReady) {
+          sessionReady = true;
+          console.log("[relay] Session ready — flushing queued client messages");
+          while (messageQueue.length > 0) {
+            openaiWs.send(messageQueue.shift());
+          }
+        }
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -504,9 +511,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] response.created id=${respId}`);
         logState("resp.created");
 
-        if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — always cancel
-          console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
+        if (!sessionReady || (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp)) {
+          // Cancel responses before session is ready or while wake word gating is active
+          console.log(!sessionReady ? `[relay] BLOCKING auto-response ${respId} (session not ready)` : `[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
@@ -665,7 +672,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   });
 
   clientWs.on("message", (data) => {
-    if (openaiWs.readyState === WebSocket.OPEN) {
+    if (openaiWs.readyState === WebSocket.OPEN && sessionReady) {
       openaiWs.send(data.toString());
     } else {
       messageQueue.push(data.toString());
