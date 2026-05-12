@@ -10,8 +10,7 @@ dotenv.config();
 
 // ── Env & config ──────────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const BACKEND_API_URL = process.env.BACKEND_API_URL || "";
-const BACKEND_API_KEY = process.env.BACKEND_API_KEY || "";
+const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const PORT = process.env.PORT ?? 3000;
 
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
@@ -90,8 +89,11 @@ function isHallucination(transcript) {
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
+// CHANGED: Removed instructional sentences — Whisper ignores them and they
+// become hallucination material. Only proper nouns remain as vocabulary hints.
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
+
   let prompt = properNouns;
   if (wakeWord) {
     prompt += `, ${wakeWord}`;
@@ -116,37 +118,6 @@ const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.delta",
   "response.function_call_arguments.done",
 ]);
-
-// ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
-async function getAllowedTagIds(meetingToken) {
-  if (!meetingToken || !BACKEND_API_URL) return null;
-
-  // Retry up to 3 times with 2s delay — the tag assignment from the frontend's
-  // PUT /api/meetings/:botId/tags call may arrive slightly after the relay connects.
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(
-        `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
-        { headers: { "x-api-key": BACKEND_API_KEY } }
-      );
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (data.tag_ids !== null) {
-        console.log(`[relay] allowedTagIds resolved on attempt ${attempt}`);
-        return data.tag_ids;
-      }
-      if (attempt < 3) {
-        console.log(`[relay] allowedTagIds null on attempt ${attempt}, retrying in 2s...`);
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    } catch (e) {
-      console.error("[relay] getAllowedTagIds error:", e);
-      return null;
-    }
-  }
-  console.log(`[relay] allowedTagIds still null after 3 attempts — no filter applied`);
-  return null;
-}
 
 // ── HTTP health endpoint ──────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
@@ -175,10 +146,7 @@ wss.on("connection", (clientWs, req) => {
     return;
   }
 
-  const meetingToken = url.searchParams.get("meetingToken") || null;
-  console.log(`[relay] Connection: meetingToken=${meetingToken}`);
-
-  let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
+  console.log("[relay] Client connected — opening OpenAI Realtime connection");
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -186,9 +154,6 @@ wss.on("connection", (clientWs, req) => {
     },
   });
 
-  let openaiReconnecting = false;   // true while a reconnect attempt is in progress
-  let clientAlive = true;           // false after clientWs closes — prevents reconnect
-  let keepaliveTimer = null;        // holds the setInterval reference for the keepalive ping
   const messageQueue = [];
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -201,7 +166,6 @@ wss.on("connection", (clientWs, req) => {
   let transcriptionPrompt = "";
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
-  let sessionUpdate = null;         // holds session config for reconnect
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -300,21 +264,15 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
 
-    // ── Fetch config and tag filter from main backend API ────────────────────
-    const [apiConfig, resolvedTagIds] = await Promise.all([
-      fetchVoiceAgentConfig(),
-      getAllowedTagIds(meetingToken),
-    ]);
-    allowedTagIds = resolvedTagIds;
-    console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
+    // ── Fetch config from main backend API ───────────────────────────────────
+    const apiConfig = await fetchVoiceAgentConfig();
 
     let instructions, voice, language;
     if (apiConfig) {
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
-      language = apiConfig.language ?? "en";
-      console.log(`[relay] Language from config: "${apiConfig.language}" → resolved: "${language}"`);
+      language = apiConfig.language || "tr";
       wakeWord = apiConfig.wake_word || null;
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
@@ -345,7 +303,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
-    sessionUpdate = {
+    const sessionUpdate = {
       type: "session.update",
       session: {
         type: "realtime",
@@ -386,14 +344,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
 
-    // ── Keepalive: send a ping every 20s to prevent OpenAI idle timeout ──────
-    keepaliveTimer = setInterval(() => {
-      if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.ping();
-        console.log("[relay] Keepalive ping sent to OpenAI");
-      }
-    }, 20000);
-
     // Send agent config (photo URL) to the client
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify({
@@ -403,6 +353,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       console.log(`[relay] Sent agent.config to client — photo_url=${apiConfig?.photo_url ? "set" : "none"}`);
     }
 
+    while (messageQueue.length > 0) {
+      openaiWs.send(messageQueue.shift());
+    }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -426,10 +379,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log("[relay] Session created:", msg.session?.id);
       }
       if (msg.type === "session.updated") {
-        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
-        while (messageQueue.length > 0) {
-          openaiWs.send(messageQueue.shift());
-        }
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice,
+          "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -512,7 +463,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Cancel auto-generated responses while wake word gating is active
+          // Auto-generated response while sleeping — always cancel
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -617,10 +568,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
-                allowedTagIds,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -663,20 +613,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   // ── Connection lifecycle ───────────────────────────────────────────────────
   openaiWs.on("close", (code, reason) => {
     console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
-    clearInterval(keepaliveTimer);
-
-    // If client is gone, nothing to reconnect for
-    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
-      console.log("[relay] Client already gone — not reconnecting");
-      return;
-    }
-
-    // OpenAI dropped us (e.g. ~30 min session limit) — attempt one reconnect
-    if (!openaiReconnecting) {
-      openaiReconnecting = true;
-      console.log("[relay] OpenAI connection dropped — attempting reconnect in 1s");
-      setTimeout(() => reconnectToOpenAI(), 1000);
-    }
+    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
   });
 
   openaiWs.on("error", (err) => {
@@ -695,8 +632,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   clientWs.on("close", () => {
     console.log("[relay] Client disconnected — closing OpenAI connection");
     logState("client-disconnect");
-    clientAlive = false;
-    clearInterval(keepaliveTimer);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 
@@ -704,69 +639,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     console.error("[relay] Client WebSocket error:", err.message);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
-
-  // ── Reconnect to OpenAI after unexpected close ────────────────────────────
-  function reconnectToOpenAI() {
-    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
-      console.log("[relay] Reconnect aborted — client gone");
-      openaiReconnecting = false;
-      return;
-    }
-
-    console.log("[relay] Reconnecting to OpenAI Realtime API...");
-
-    // Reset session state so the new session starts clean
-    isAwake = false;
-    pendingManualResponse = false;
-    awaitingToolFollowUp = false;
-    activeResponseId = null;
-
-    const newOpenaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-    });
-
-    newOpenaiWs.on("open", () => {
-      console.log("[relay] Reconnected to OpenAI — re-sending session.update");
-      openaiReconnecting = false;
-
-      // Re-send session.update with the same config (already in closure scope)
-      newOpenaiWs.send(JSON.stringify(sessionUpdate));
-
-      // Restart keepalive
-      keepaliveTimer = setInterval(() => {
-        if (newOpenaiWs.readyState === WebSocket.OPEN) {
-          newOpenaiWs.ping();
-          console.log("[relay] Keepalive ping sent to OpenAI (reconnected session)");
-        }
-      }, 20000);
-    });
-
-    newOpenaiWs.on("message", async (data) => {
-      // Forward OpenAI messages to client using the same handler logic
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(data.toString());
-      }
-    });
-
-    newOpenaiWs.on("close", (code, reason) => {
-      console.log("[relay] Reconnected OpenAI WS closed:", { code, reason: reason?.toString() });
-      clearInterval(keepaliveTimer);
-      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
-        console.log("[relay] Second OpenAI close — closing client");
-        clientWs.close();
-      }
-    });
-
-    newOpenaiWs.on("error", (err) => {
-      console.error("[relay] Reconnected OpenAI WS error:", err.message);
-      openaiReconnecting = false;
-      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close();
-      }
-    });
-  }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -781,7 +653,6 @@ httpServer.listen(PORT, () => {
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
     BACKEND_API_URL: process.env.BACKEND_API_URL ? "set" : "MISSING",
-    BACKEND_API_KEY: process.env.BACKEND_API_KEY ? "set" : "MISSING",
     KB_ENABLED,
   });
 });
