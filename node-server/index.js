@@ -421,15 +421,13 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               // whisper-1 hallucinates heavily on silence/noise (produces
               // "Thanks for watching", "Subscribe", etc.). gpt-4o-mini-transcribe
               // is substantially more robust against this failure mode.
-              model: "gpt-4o-mini-transcribe",
+              model: "gpt-4o-transcribe",
               language,
               prompt: transcriptionPrompt,
             },
             turn_detection: {
               type: "server_vad",
-              // CHANGED: 0.6 → 0.75 — more conservative VAD reduces false
-              // triggers on background noise / breathing / keyboard.
-              threshold: 0.75,
+              threshold: 0.6,
               prefix_padding_ms: 300,
               // CHANGED: 800 → 1000 — wait longer before declaring end-of-turn
               // so short pauses inside a sentence aren't treated as end-of-speech.

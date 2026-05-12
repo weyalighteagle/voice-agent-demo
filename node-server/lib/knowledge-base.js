@@ -1,9 +1,6 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
-const KB_MATCH_THRESHOLD = parseFloat(process.env.KB_MATCH_THRESHOLD || "0.3");
-const KB_MATCH_COUNT = parseInt(process.env.KB_MATCH_COUNT || "5", 10);
-
 export async function searchKnowledgeBase(query, { category = null, date_from = null, date_to = null, meeting_type = null, allowedTagIds = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
@@ -18,40 +15,41 @@ export async function searchKnowledgeBase(query, { category = null, date_from = 
 
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
-  // Lower threshold when a date or meeting_title/meeting_type filter is present — these
-  // filters already narrow the result set so we don't need strict semantic similarity.
-  const hasContextFilter = date_from || date_to || meeting_type;
-  const effectiveThreshold = hasContextFilter
-    ? Math.min(KB_MATCH_THRESHOLD, 0.1)
-    : KB_MATCH_THRESHOLD;
+  const hasCategory = category !== null && category !== undefined && category !== "";
+  // When no category filter, fetch more results to compensate for lower precision
+  const matchCount = hasCategory ? 5 : 10;
+  // Use 0.0 threshold — always return top-N by similarity; formatKBResults handles quality
+  const matchThreshold = 0.0;
 
-  // Increase match_count when date filter is active — narrow date ranges may have few results
-  const effectiveMatchCount = (date_from || date_to) ? Math.max(KB_MATCH_COUNT, 10) : KB_MATCH_COUNT;
-
-  // Always send ALL parameters so Supabase can match the function signature by name.
   const rpcParams = {
     query_embedding: embeddingStr,
-    match_threshold: effectiveThreshold,
-    match_count: effectiveMatchCount,
-    filter_category: (category !== null && category !== undefined && category !== "") ? category : null,
+    match_threshold: matchThreshold,
+    match_count: matchCount,
     filter_date_from: date_from || null,
     filter_date_to: date_to || null,
     filter_meeting_type: meeting_type || null,
     p_org_id: null,
-    p_allowed_tag_ids: allowedTagIds || null,
   };
 
-  const { data, error } = await supabase.rpc(
-    "search_knowledge_base",
-    rpcParams
-  );
+  if (hasCategory) {
+    rpcParams.filter_category = category;
+  }
+
+  // Only send p_allowed_tag_ids when there is a real list — passing null causes a
+  // Supabase RPC type mismatch (uuid[] vs null literal) that silently returns 0 rows.
+  if (Array.isArray(allowedTagIds) && allowedTagIds.length > 0) {
+    rpcParams.p_allowed_tag_ids = allowedTagIds;
+  }
+
+  const { data, error } = await supabase.rpc("search_knowledge_base", rpcParams);
 
   const tSearch = Date.now();
   console.log(
     `[kb] Search: embed=${tEmbed - t0}ms, search=${tSearch - tEmbed}ms, total=${tSearch - t0}ms, ` +
-    `results=${data?.length ?? 0}, threshold=${effectiveThreshold}${hasContextFilter ? " (lowered)" : ""}, ` +
+    `results=${data?.length ?? 0}, threshold=${matchThreshold}, matchCount=${matchCount}, ` +
     `category=${category || "ALL"}, meeting_type=${meeting_type || "none"}, ` +
     `date_from=${date_from || "none"}, date_to=${date_to || "none"}, ` +
+    `allowedTagIds=${allowedTagIds ? JSON.stringify(allowedTagIds) : "none"}, ` +
     `error=${error ? JSON.stringify(error) : "none"}`
   );
 
