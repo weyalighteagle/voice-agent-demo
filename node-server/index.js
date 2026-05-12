@@ -190,7 +190,6 @@ wss.on("connection", (clientWs, req) => {
   let clientAlive = true;           // false after clientWs closes — prevents reconnect
   let keepaliveTimer = null;        // holds the setInterval reference for the keepalive ping
   const messageQueue = [];
-  let sessionReady = false;   // true after session.updated received
 
   // ══════════════════════════════════════════════════════════════════════════
   // ▸ WAKE WORD — per-connection state
@@ -428,12 +427,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       }
       if (msg.type === "session.updated") {
         console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
-        if (!sessionReady) {
-          sessionReady = true;
-          console.log("[relay] Session ready — flushing queued client messages");
-          while (messageQueue.length > 0) {
-            openaiWs.send(messageQueue.shift());
-          }
+        while (messageQueue.length > 0) {
+          openaiWs.send(messageQueue.shift());
         }
       }
 
@@ -516,9 +511,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] response.created id=${respId}`);
         logState("resp.created");
 
-        if (!sessionReady || (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp)) {
-          // Cancel responses before session is ready or while wake word gating is active
-          console.log(!sessionReady ? `[relay] BLOCKING auto-response ${respId} (session not ready)` : `[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
+        if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
+          // Cancel auto-generated responses while wake word gating is active
+          console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
           return;
@@ -690,7 +685,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   });
 
   clientWs.on("message", (data) => {
-    if (openaiWs.readyState === WebSocket.OPEN && sessionReady) {
+    if (openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.send(data.toString());
     } else {
       messageQueue.push(data.toString());
@@ -721,7 +716,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     console.log("[relay] Reconnecting to OpenAI Realtime API...");
 
     // Reset session state so the new session starts clean
-    sessionReady = false;
     isAwake = false;
     pendingManualResponse = false;
     awaitingToolFollowUp = false;
@@ -754,14 +748,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(data.toString());
       }
-      // Handle session.updated to mark session ready after reconnect
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === "session.updated" && !sessionReady) {
-          sessionReady = true;
-          console.log("[relay] Reconnected session ready");
-        }
-      } catch {}
     });
 
     newOpenaiWs.on("close", (code, reason) => {
