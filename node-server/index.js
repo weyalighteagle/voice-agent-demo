@@ -10,7 +10,8 @@ dotenv.config();
 
 // ── Env & config ──────────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const BACKEND_API_URL = process.env.BACKEND_API_URL;
+const BACKEND_API_URL = process.env.BACKEND_API_URL || "";
+const BACKEND_API_KEY = process.env.BACKEND_API_KEY || "";
 const PORT = process.env.PORT ?? 3000;
 
 const OPENAI_MODEL = "gpt-realtime-2025-08-28";
@@ -22,8 +23,10 @@ if (!OPENAI_API_KEY) {
 }
 
 // ── Hallucination blocklist ───────────────────────────────────────────────────
-// Known Whisper hallucinations on silence/noise for Turkish & English
+// Known Whisper / ASR hallucinations on silence/noise for Turkish & English.
+// Normalized form: lowercase, trailing punctuation stripped.
 const HALLUCINATION_BLOCKLIST = new Set([
+  // Turkish — YouTube / subtitle boilerplate
   "altyazı",
   "alt yazı",
   "altyazılar",
@@ -40,8 +43,16 @@ const HALLUCINATION_BLOCKLIST = new Set([
   "türkçe altyazı",
   "altyazı çevirisi",
   "çeviri",
+  "teşekkürler",
+  "teşekkür ederim",
+  "dua dua dua",
+  // English — YouTube / podcast boilerplate
   "thanks for watching",
   "thank you for watching",
+  "thanks for listening",
+  "thank you for listening",
+  "thanks for coming",
+  "thanks for this talk",
   "subscribe",
   "like and subscribe",
   "please subscribe",
@@ -50,11 +61,22 @@ const HALLUCINATION_BLOCKLIST = new Set([
   "transcribed by",
   "transcript by",
   "thank you",
-  "teşekkürler",
-  "teşekkür ederim",
+  "thank you very much",
+  "hello everyone",
+  "hello, everyone",
+  "bye",
+  "goodbye",
+  "see you",
+  "see you next time",
+  "see you in the next video",
+  "i'll see you in the next video",
+  "i'll talk to you next week",
+  "i hope you enjoyed this video",
+  "and all of them",
+  "yep",
 ]);
 
-// Patterns that indicate hallucination even as substring
+// Patterns that indicate hallucination even as substring / partial match.
 const HALLUCINATION_PATTERNS = [
   /altyazı/i,
   /abone ol/i,
@@ -66,34 +88,62 @@ const HALLUCINATION_PATTERNS = [
   /seyrettiğiniz için/i,
   /bir sonraki video/i,
   /beğenmeyi.*abone/i,
+  // English YouTube/podcast patterns
+  /i hope you enjoyed/i,
+  /leave a comment/i,
+  /next video/i,
+  /next week/i,
+  /thanks for (listening|coming|watching|this talk)/i,
+  /thank you for (listening|coming|watching|this talk)/i,
+  /see you (in|next)/i,
+  /^(thank you[\s,.!?]*)+$/i,        // "Thank you. Thank you."
+  /^(bye[\s,.!?]*)+$/i,              // "Bye. Bye."
+  /^(dua[\s,.!?]*)+$/i,              // "Dua Dua Dua"
+  /^(yep[\s,.!?]*)+$/i,
+  /^(yeah[\s,.!?]*)+$/i,
+  // Repeated single-word patterns — usually transcription artifacts
+  /^(\w+[\s,.!?]+)\1{2,}$/i,         // same word repeated 3+ times
 ];
 
 /**
- * Check if a transcript is a known Whisper hallucination.
- * Returns true if the transcript should be discarded.
+ * Check if a transcript is a known ASR hallucination.
+ * @param {string} transcript - the raw transcript from ASR
+ * @param {string} expectedLanguage - the configured session language ("tr", "en", ...)
+ * @returns {boolean} true if the transcript should be discarded.
  */
-function isHallucination(transcript) {
+function isHallucination(transcript, expectedLanguage) {
   const trimmed = transcript.trim();
 
   // Too short to be real speech (1-2 chars)
   if (trimmed.length < 2) return true;
 
-  // Exact match against blocklist (case-insensitive, stripped punctuation)
+  // Exact match against blocklist (case-insensitive, stripped trailing punctuation)
   const normalized = trimmed.toLowerCase().replace(/[.,!?…:;'""\-]+$/g, "").trim();
   if (HALLUCINATION_BLOCKLIST.has(normalized)) return true;
 
   // Pattern match
   if (HALLUCINATION_PATTERNS.some(p => p.test(trimmed))) return true;
 
+  // Language-mismatch heuristic: in a Turkish session, a transcript that is
+  // pure ASCII English with no Turkish chars / no common Turkish words is
+  // almost always a hallucination on silence/noise.
+  if (expectedLanguage === "tr") {
+    const hasTurkishChars = /[çğıöşüÇĞİÖŞÜ]/.test(trimmed);
+    const hasTurkishWords = /\b(bir|bu|şu|şey|ve|için|ile|ben|sen|biz|siz|onlar|var|yok|ne|nasıl|neden|niye|evet|hayır|tamam|merhaba|selam|teşekkür|olur|olmaz|değil|gibi|ama|fakat|çok|az|daha|en|şimdi|sonra|önce|peki|tabii|işte|hadi|şöyle|böyle|bence|sanırım|herkes|kim|ki|de|da)\b/i.test(trimmed);
+    const onlyAsciiLetters = /^[a-zA-Z0-9\s.,!?'"\-:;]+$/.test(trimmed);
+
+    // If it's >6 chars, only ASCII letters, no Turkish indicators → very likely a hallucination
+    if (trimmed.length > 6 && onlyAsciiLetters && !hasTurkishChars && !hasTurkishWords) {
+      return true;
+    }
+  }
+
   return false;
 }
 
 // ── Transcription prompt builder ──────────────────────────────────────────────
-// CHANGED: Removed instructional sentences — Whisper ignores them and they
-// become hallucination material. Only proper nouns remain as vocabulary hints.
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
-
   let prompt = properNouns;
   if (wakeWord) {
     prompt += `, ${wakeWord}`;
@@ -118,6 +168,37 @@ const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.delta",
   "response.function_call_arguments.done",
 ]);
+
+// ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
+async function getAllowedTagIds(meetingToken) {
+  if (!meetingToken || !BACKEND_API_URL) return null;
+
+  // Retry up to 3 times with 2s delay — the tag assignment from the frontend's
+  // PUT /api/meetings/:botId/tags call may arrive slightly after the relay connects.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(
+        `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
+        { headers: { "x-api-key": BACKEND_API_KEY } }
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data.tag_ids !== null) {
+        console.log(`[relay] allowedTagIds resolved on attempt ${attempt}`);
+        return data.tag_ids;
+      }
+      if (attempt < 3) {
+        console.log(`[relay] allowedTagIds null on attempt ${attempt}, retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } catch (e) {
+      console.error("[relay] getAllowedTagIds error:", e);
+      return null;
+    }
+  }
+  console.log(`[relay] allowedTagIds still null after 3 attempts — no filter applied`);
+  return null;
+}
 
 // ── HTTP health endpoint ──────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
@@ -146,7 +227,10 @@ wss.on("connection", (clientWs, req) => {
     return;
   }
 
-  console.log("[relay] Client connected — opening OpenAI Realtime connection");
+  const meetingToken = url.searchParams.get("meetingToken") || null;
+  console.log(`[relay] Connection: meetingToken=${meetingToken}`);
+
+  let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -154,6 +238,9 @@ wss.on("connection", (clientWs, req) => {
     },
   });
 
+  let openaiReconnecting = false;   // true while a reconnect attempt is in progress
+  let clientAlive = true;           // false after clientWs closes — prevents reconnect
+  let keepaliveTimer = null;        // holds the setInterval reference for the keepalive ping
   const messageQueue = [];
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -166,6 +253,8 @@ wss.on("connection", (clientWs, req) => {
   let transcriptionPrompt = "";
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
+  let sessionUpdate = null;         // holds session config for reconnect
+  let sessionLanguage = "tr";       // configured session language — used by hallucination filter
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -264,15 +353,21 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
 
-    // ── Fetch config from main backend API ───────────────────────────────────
-    const apiConfig = await fetchVoiceAgentConfig();
+    // ── Fetch config and tag filter from main backend API ────────────────────
+    const [apiConfig, resolvedTagIds] = await Promise.all([
+      fetchVoiceAgentConfig(),
+      getAllowedTagIds(meetingToken),
+    ]);
+    allowedTagIds = resolvedTagIds;
+    console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
 
     let instructions, voice, language;
     if (apiConfig) {
       console.log("[relay] Using config from: API");
       instructions = apiConfig.system_prompt || HARDCODED_INSTRUCTIONS;
       voice = apiConfig.voice || "cedar";
-      language = apiConfig.language || "tr";
+      language = apiConfig.language ?? "en";
+      console.log(`[relay] Language from config: "${apiConfig.language}" → resolved: "${language}"`);
       wakeWord = apiConfig.wake_word || null;
     } else {
       console.warn("[relay] Failed to fetch config from API, using hardcoded fallback");
@@ -282,6 +377,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       language = "tr";
       wakeWord = null;
     }
+
+    // Expose to outer scope so the hallucination filter (in the message
+    // handler) can read the configured language.
+    sessionLanguage = language;
 
     // ── Inject today's date so the LLM can resolve relative dates ─────────
     const today = new Date();
@@ -303,7 +402,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
 
-    const sessionUpdate = {
+    sessionUpdate = {
       type: "session.update",
       session: {
         type: "realtime",
@@ -313,23 +412,28 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
-            // ADDED: noise reduction for meeting room (far-field microphone)
+            // Noise reduction for meeting room (far-field microphone)
             noise_reduction: {
               type: "far_field",
             },
             transcription: {
-              model: "whisper-1",
+              // CHANGED: whisper-1 → gpt-4o-mini-transcribe.
+              // whisper-1 hallucinates heavily on silence/noise (produces
+              // "Thanks for watching", "Subscribe", etc.). gpt-4o-mini-transcribe
+              // is substantially more robust against this failure mode.
+              model: "gpt-4o-mini-transcribe",
               language,
               prompt: transcriptionPrompt,
             },
             turn_detection: {
               type: "server_vad",
-              // CHANGED: 0.5 → 0.6 — reduces false triggers on background noise
-              threshold: 0.6,
-              // CHANGED: 500 → 300 — less silent audio captured before speech
+              // CHANGED: 0.6 → 0.75 — more conservative VAD reduces false
+              // triggers on background noise / breathing / keyboard.
+              threshold: 0.75,
               prefix_padding_ms: 300,
-              // CHANGED: 600 → 800 — short pauses won't be treated as end-of-speech
-              silence_duration_ms: 800,
+              // CHANGED: 800 → 1000 — wait longer before declaring end-of-turn
+              // so short pauses inside a sentence aren't treated as end-of-speech.
+              silence_duration_ms: 1000,
             },
           },
           output: {
@@ -344,6 +448,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     openaiWs.send(JSON.stringify(sessionUpdate));
     console.log(`[relay] Sent session.update — model=${OPENAI_MODEL}, KB=${KB_ENABLED ? "ON" : "OFF"}`);
 
+    // ── Keepalive: send a ping every 20s to prevent OpenAI idle timeout ──────
+    keepaliveTimer = setInterval(() => {
+      if (openaiWs.readyState === WebSocket.OPEN) {
+        openaiWs.ping();
+        console.log("[relay] Keepalive ping sent to OpenAI");
+      }
+    }, 20000);
+
     // Send agent config (photo URL) to the client
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify({
@@ -353,9 +465,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       console.log(`[relay] Sent agent.config to client — photo_url=${apiConfig?.photo_url ? "set" : "none"}`);
     }
 
-    while (messageQueue.length > 0) {
-      openaiWs.send(messageQueue.shift());
-    }
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -379,8 +488,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log("[relay] Session created:", msg.session?.id);
       }
       if (msg.type === "session.updated") {
-        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice,
-          "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+        console.log("[relay] Session updated — voice:", msg.session?.audio?.output?.voice, "| turn_detection:", msg.session?.audio?.input?.turn_detection?.type);
+        while (messageQueue.length > 0) {
+          openaiWs.send(messageQueue.shift());
+        }
       }
 
       // ════════════════════════════════════════════════════════════════════
@@ -399,10 +510,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] Transcript: "${transcript}"`);
         logState("transcript");
 
-        // ── Guard 1: Hallucination blocklist (ADDED)
-        if (isHallucination(transcript)) {
-          console.log(`[relay] HALLUCINATION BLOCKED — blocklist match: "${transcript}"`);
-          // Still forward to client so they see what was filtered
+        // ── Guard 1: Hallucination filter (blocklist + patterns + language mismatch)
+        if (isHallucination(transcript, sessionLanguage)) {
+          console.log(`[relay] HALLUCINATION BLOCKED: "${transcript}"`);
+          // Still forward to client so the UI can show what was filtered
           if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
           return;
         }
@@ -463,7 +574,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         logState("resp.created");
 
         if (wakeWordEnabled && !isAwake && !pendingManualResponse && !awaitingToolFollowUp) {
-          // Auto-generated response while sleeping — always cancel
+          // Cancel auto-generated responses while wake word gating is active
           console.log(`[relay] BLOCKING auto-response ${respId} (sleeping, no pending, no tool follow-up)`);
           activeResponseId = respId;
           openaiWs.send(JSON.stringify({ type: "response.cancel" }));
@@ -568,9 +679,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
+                allowedTagIds,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -613,7 +725,20 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   // ── Connection lifecycle ───────────────────────────────────────────────────
   openaiWs.on("close", (code, reason) => {
     console.log("[relay] OpenAI WS closed:", { code, reason: reason?.toString() });
-    if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+    clearInterval(keepaliveTimer);
+
+    // If client is gone, nothing to reconnect for
+    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
+      console.log("[relay] Client already gone — not reconnecting");
+      return;
+    }
+
+    // OpenAI dropped us (e.g. ~30 min session limit) — attempt one reconnect
+    if (!openaiReconnecting) {
+      openaiReconnecting = true;
+      console.log("[relay] OpenAI connection dropped — attempting reconnect in 1s");
+      setTimeout(() => reconnectToOpenAI(), 1000);
+    }
   });
 
   openaiWs.on("error", (err) => {
@@ -632,6 +757,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
   clientWs.on("close", () => {
     console.log("[relay] Client disconnected — closing OpenAI connection");
     logState("client-disconnect");
+    clientAlive = false;
+    clearInterval(keepaliveTimer);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
 
@@ -639,6 +766,69 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     console.error("[relay] Client WebSocket error:", err.message);
     if (openaiWs.readyState === WebSocket.OPEN) openaiWs.close();
   });
+
+  // ── Reconnect to OpenAI after unexpected close ────────────────────────────
+  function reconnectToOpenAI() {
+    if (!clientAlive || clientWs.readyState !== WebSocket.OPEN) {
+      console.log("[relay] Reconnect aborted — client gone");
+      openaiReconnecting = false;
+      return;
+    }
+
+    console.log("[relay] Reconnecting to OpenAI Realtime API...");
+
+    // Reset session state so the new session starts clean
+    isAwake = false;
+    pendingManualResponse = false;
+    awaitingToolFollowUp = false;
+    activeResponseId = null;
+
+    const newOpenaiWs = new WebSocket(OPENAI_REALTIME_URL, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+    });
+
+    newOpenaiWs.on("open", () => {
+      console.log("[relay] Reconnected to OpenAI — re-sending session.update");
+      openaiReconnecting = false;
+
+      // Re-send session.update with the same config (already in closure scope)
+      newOpenaiWs.send(JSON.stringify(sessionUpdate));
+
+      // Restart keepalive
+      keepaliveTimer = setInterval(() => {
+        if (newOpenaiWs.readyState === WebSocket.OPEN) {
+          newOpenaiWs.ping();
+          console.log("[relay] Keepalive ping sent to OpenAI (reconnected session)");
+        }
+      }, 20000);
+    });
+
+    newOpenaiWs.on("message", async (data) => {
+      // Forward OpenAI messages to client using the same handler logic
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data.toString());
+      }
+    });
+
+    newOpenaiWs.on("close", (code, reason) => {
+      console.log("[relay] Reconnected OpenAI WS closed:", { code, reason: reason?.toString() });
+      clearInterval(keepaliveTimer);
+      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
+        console.log("[relay] Second OpenAI close — closing client");
+        clientWs.close();
+      }
+    });
+
+    newOpenaiWs.on("error", (err) => {
+      console.error("[relay] Reconnected OpenAI WS error:", err.message);
+      openaiReconnecting = false;
+      if (clientAlive && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close();
+      }
+    });
+  }
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -653,6 +843,7 @@ httpServer.listen(PORT, () => {
     SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY ? "set" : "MISSING",
     OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "set" : "MISSING",
     BACKEND_API_URL: process.env.BACKEND_API_URL ? "set" : "MISSING",
+    BACKEND_API_KEY: process.env.BACKEND_API_KEY ? "set" : "MISSING",
     KB_ENABLED,
   });
 });
