@@ -92,16 +92,9 @@ function isHallucination(transcript) {
 // ── Transcription prompt builder ──────────────────────────────────────────────
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
-
-  let prompt;
-  if (language === "tr") {
-    prompt = "Bu bir Türkçe toplantı kaydıdır. Yalnızca Türkçe olarak transcribe et.";
-  } else {
-    prompt = "This meeting may be conducted in Turkish or English. Transcribe in whichever language is being spoken — do not force a single language.";
-  }
-  prompt += ` Proper nouns: ${properNouns}.`;
+  let prompt = properNouns;
   if (wakeWord) {
-    prompt += ` "${wakeWord}" is a trigger word — always transcribe it exactly as "${wakeWord}".`;
+    prompt += `, ${wakeWord}`;
   }
   return prompt;
 }
@@ -368,9 +361,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               type: "far_field",
             },
             transcription: {
-              model: "gpt-4o-mini-transcribe",
-              ...(language === "tr" ? { language: "tr" } : {}),
-              prompt: buildTranscriptionPrompt(language, wakeWord),
+              model: "whisper-1",
+              language,
+              prompt: transcriptionPrompt,
             },
             turn_detection: {
               type: "server_vad",
