@@ -384,19 +384,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] Transcript: "${transcript}"`);
         logState("transcript");
 
-        // ── Guard: Prompt echo (ASR outputs its own prompt as transcript)
-        if (transcriptionPrompt && transcript.length > 40) {
-          const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
-          const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
-          const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
-          const matchCount = promptWords.filter(w => normT.includes(w)).length;
-          if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
-            console.log(`[relay] PROMPT ECHO BLOCKED (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
-            if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
-            return;
-          }
-        }
-
         // ── Wake word detection (only when sleeping)
         if (wakeWordEnabled && !isAwake) {
           const wakeMatch = containsWakeWord(transcript, wakeWord);
