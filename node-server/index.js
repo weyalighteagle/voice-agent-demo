@@ -22,125 +22,6 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-// ── Hallucination blocklist ───────────────────────────────────────────────────
-// Known Whisper / ASR hallucinations on silence/noise for Turkish & English.
-// Normalized form: lowercase, trailing punctuation stripped.
-const HALLUCINATION_BLOCKLIST = new Set([
-  // Turkish — YouTube / subtitle boilerplate
-  "altyazı",
-  "alt yazı",
-  "altyazılar",
-  "abone ol",
-  "abone olun",
-  "abone olmayı unutmayın",
-  "beğen ve abone ol",
-  "beğenmeyi ve abone olmayı unutmayın",
-  "izlediğiniz için teşekkürler",
-  "izlediğiniz için teşekkür ederim",
-  "seyrettiğiniz için teşekkürler",
-  "bir sonraki videoda görüşmek üzere",
-  "bir sonraki videoda görüşürüz",
-  "türkçe altyazı",
-  "altyazı çevirisi",
-  "çeviri",
-  "teşekkürler",
-  "teşekkür ederim",
-  "dua dua dua",
-  // English — YouTube / podcast boilerplate
-  "thanks for watching",
-  "thank you for watching",
-  "thanks for listening",
-  "thank you for listening",
-  "thanks for coming",
-  "thanks for this talk",
-  "subscribe",
-  "like and subscribe",
-  "please subscribe",
-  "subtitles by the amara.org community",
-  "subtitles by",
-  "transcribed by",
-  "transcript by",
-  "thank you",
-  "thank you very much",
-  "hello everyone",
-  "hello, everyone",
-  "bye",
-  "goodbye",
-  "see you",
-  "see you next time",
-  "see you in the next video",
-  "i'll see you in the next video",
-  "i'll talk to you next week",
-  "i hope you enjoyed this video",
-  "and all of them",
-  "yep",
-]);
-
-// Patterns that indicate hallucination even as substring / partial match.
-const HALLUCINATION_PATTERNS = [
-  /altyazı/i,
-  /abone ol/i,
-  /subscribe/i,
-  /amara\.org/i,
-  /subtitles?\s+by/i,
-  /transcri(bed|pt)\s+by/i,
-  /izlediğiniz için teşekkür/i,
-  /seyrettiğiniz için/i,
-  /bir sonraki video/i,
-  /beğenmeyi.*abone/i,
-  // English YouTube/podcast patterns
-  /i hope you enjoyed/i,
-  /leave a comment/i,
-  /next video/i,
-  /next week/i,
-  /thanks for (listening|coming|watching|this talk)/i,
-  /thank you for (listening|coming|watching|this talk)/i,
-  /see you (in|next)/i,
-  /^(thank you[\s,.!?]*)+$/i,        // "Thank you. Thank you."
-  /^(bye[\s,.!?]*)+$/i,              // "Bye. Bye."
-  /^(dua[\s,.!?]*)+$/i,              // "Dua Dua Dua"
-  /^(yep[\s,.!?]*)+$/i,
-  /^(yeah[\s,.!?]*)+$/i,
-  // Repeated single-word patterns — usually transcription artifacts
-  /^(\w+[\s,.!?]+)\1{2,}$/i,         // same word repeated 3+ times
-];
-
-/**
- * Check if a transcript is a known ASR hallucination.
- * @param {string} transcript - the raw transcript from ASR
- * @param {string} expectedLanguage - the configured session language ("tr", "en", ...)
- * @returns {boolean} true if the transcript should be discarded.
- */
-function isHallucination(transcript, expectedLanguage) {
-  const trimmed = transcript.trim();
-
-  // Too short to be real speech (1-2 chars)
-  if (trimmed.length < 2) return true;
-
-  // Exact match against blocklist (case-insensitive, stripped trailing punctuation)
-  const normalized = trimmed.toLowerCase().replace(/[.,!?…:;'""\-]+$/g, "").trim();
-  if (HALLUCINATION_BLOCKLIST.has(normalized)) return true;
-
-  // Pattern match
-  if (HALLUCINATION_PATTERNS.some(p => p.test(trimmed))) return true;
-
-  // Language-mismatch heuristic: in a Turkish session, a transcript that is
-  // pure ASCII English with no Turkish chars / no common Turkish words is
-  // almost always a hallucination on silence/noise.
-  if (expectedLanguage === "tr") {
-    const hasTurkishChars = /[çğıöşüÇĞİÖŞÜ]/.test(trimmed);
-    const hasTurkishWords = /\b(bir|bu|şu|şey|ve|için|ile|ben|sen|biz|siz|onlar|var|yok|ne|nasıl|neden|niye|evet|hayır|tamam|merhaba|selam|teşekkür|olur|olmaz|değil|gibi|ama|fakat|çok|az|daha|en|şimdi|sonra|önce|peki|tabii|işte|hadi|şöyle|böyle|bence|sanırım|herkes|kim|ki|de|da)\b/i.test(trimmed);
-    const onlyAsciiLetters = /^[a-zA-Z0-9\s.,!?'"\-:;]+$/.test(trimmed);
-
-    // If it's >6 chars, only ASCII letters, no Turkish indicators → very likely a hallucination
-    if (trimmed.length > 6 && onlyAsciiLetters && !hasTurkishChars && !hasTurkishWords) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 // ── Transcription prompt builder ──────────────────────────────────────────────
 function buildTranscriptionPrompt(language, wakeWord) {
   const properNouns = "Weya, Veya, Light Eagle, Onur, Yiğit, Heval, Gülfem, Mehmet, Cem, Yusuf";
@@ -254,7 +135,6 @@ wss.on("connection", (clientWs, req) => {
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
   let sessionUpdate = null;         // holds session config for reconnect
-  let sessionLanguage = "tr";       // configured session language — used by hallucination filter
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -378,10 +258,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       wakeWord = null;
     }
 
-    // Expose to outer scope so the hallucination filter (in the message
-    // handler) can read the configured language.
-    sessionLanguage = language;
-
     // ── Inject today's date so the LLM can resolve relative dates ─────────
     const today = new Date();
     const dateStr = today.toLocaleDateString('tr-TR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -493,7 +369,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       }
 
       // ════════════════════════════════════════════════════════════════════
-      // ▸ TRANSCRIPT — hallucination filter + wake word detection
+      // ▸ TRANSCRIPT — wake word detection
       // ════════════════════════════════════════════════════════════════════
       if (msg.type === "input_audio_buffer.speech_started") {
         console.log(`[vad] Speech started`);
@@ -508,22 +384,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
         console.log(`[relay] Transcript: "${transcript}"`);
         logState("transcript");
 
-        // ── Guard 1: Hallucination filter (blocklist + patterns + language mismatch)
-        if (isHallucination(transcript, sessionLanguage)) {
-          console.log(`[relay] HALLUCINATION BLOCKED: "${transcript}"`);
-          // Still forward to client so the UI can show what was filtered
-          if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
-          return;
-        }
-
-        // ── Guard 2: Prompt echo (ASR outputs its own prompt as transcript)
+        // ── Guard: Prompt echo (ASR outputs its own prompt as transcript)
         if (transcriptionPrompt && transcript.length > 40) {
           const normT = transcript.toLowerCase().replace(/[""''«»]/g, '"');
           const normP = transcriptionPrompt.toLowerCase().replace(/[""''«»]/g, '"');
           const promptWords = normP.split(/\s+/).filter(w => w.length > 3);
           const matchCount = promptWords.filter(w => normT.includes(w)).length;
           if (promptWords.length > 0 && matchCount / promptWords.length > 0.5) {
-            console.log(`[relay] HALLUCINATION BLOCKED — prompt echo (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
+            console.log(`[relay] PROMPT ECHO BLOCKED (${matchCount}/${promptWords.length} words matched): "${transcript.slice(0, 80)}..."`);
             if (clientWs.readyState === WebSocket.OPEN) clientWs.send(raw);
             return;
           }
