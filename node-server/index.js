@@ -388,16 +388,49 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
         // ── Wake word detection (only when sleeping)
         if (wakeWordEnabled && !isAwake) {
+
+          // ── Layer 1: prompt-echo guard (runs before containsWakeWord) ──────
+          // Build a token set from the live transcriptionPrompt string so it
+          // stays in sync automatically if the prompt changes.
+          const promptTokens = new Set(
+            transcriptionPrompt
+              .toLowerCase()
+              .replace(/[.,!?;:'"()\-–—…\[\]{}]/g, "")
+              .split(/\s+/)
+              .filter(Boolean)
+          );
+          const txTokens = transcript
+            .toLowerCase()
+            .replace(/[.,!?;:'"()\-–—…\[\]{}]/g, "")
+            .split(/\s+/)
+            .filter(Boolean);
+          const matchCount = txTokens.filter(t => promptTokens.has(t)).length;
+          const overlapRatio = txTokens.length > 0 ? matchCount / txTokens.length : 0;
+
+          if (overlapRatio >= 0.75) {
+            console.log(`[hallucination] PROMPT ECHO BLOCKED — ${matchCount}/${txTokens.length} tokens matched (ratio=${overlapRatio.toFixed(2)}): "${transcript}"`);
+            // Still forward transcript to client, but skip wake logic entirely
+          } else {
+
           const wakeMatch = containsWakeWord(transcript, wakeWord);
           console.log(`[wake] containsWakeWord="${wakeMatch}" for: "${transcript}"`);
           if (wakeMatch) {
-            // Check if there's meaningful content AFTER the wake word.
+            // ── Layer 2: check for meaningful content (prompt nouns also stripped)
             const remainder = transcript.toLowerCase()
               .replace(/hey/gi, "")
               .replace(/weya/gi, "")
               .replace(/veya/gi, "")
               .replace(/wey[aä]/gi, "")
               .replace(/vey[aä]/gi, "")
+              .replace(/onur/gi, "")
+              .replace(/yi[gğ]it/gi, "")
+              .replace(/heval/gi, "")
+              .replace(/g[uü]lfem/gi, "")
+              .replace(/mehmet/gi, "")
+              .replace(/\bcem\b/gi, "")
+              .replace(/yusuf/gi, "")
+              .replace(/light/gi, "")
+              .replace(/eagle/gi, "")
               .replace(/[.,!?\s]/g, "")
               .trim();
 
@@ -416,6 +449,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
           } else {
             // No wake word → ignore
           }
+
+          } // end Layer 1 else
         }
         // Always forward transcript to client
       }
