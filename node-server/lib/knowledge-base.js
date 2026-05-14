@@ -1,7 +1,7 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
-export async function searchKnowledgeBase(query, { category = null, date_from = null, date_to = null, meeting_type = null, allowedTagIds = null } = {}) {
+export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, allowedTagIds = null, projectId = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -15,11 +15,9 @@ export async function searchKnowledgeBase(query, { category = null, date_from = 
 
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
-  const hasCategory = category !== null && category !== undefined && category !== "";
-  // When no category filter, fetch more results to compensate for lower precision
-  const matchCount = hasCategory ? 5 : 10;
-  // Use 0.0 threshold — always return top-N by similarity; formatKBResults handles quality
-  const matchThreshold = 0.0;
+  const matchCount = 10;
+  // 0.5 threshold — only return chunks with meaningful semantic overlap; filters irrelevant noise
+  const matchThreshold = 0.5;
 
   const rpcParams = {
     query_embedding: embeddingStr,
@@ -31,8 +29,8 @@ export async function searchKnowledgeBase(query, { category = null, date_from = 
     p_org_id: null,
   };
 
-  if (hasCategory) {
-    rpcParams.filter_category = category;
+  if (projectId) {
+    rpcParams.filter_project_id = projectId;
   }
 
   // Only send p_allowed_tag_ids when there is a real list — passing null causes a
@@ -47,7 +45,7 @@ export async function searchKnowledgeBase(query, { category = null, date_from = 
   console.log(
     `[kb] Search: embed=${tEmbed - t0}ms, search=${tSearch - tEmbed}ms, total=${tSearch - t0}ms, ` +
     `results=${data?.length ?? 0}, threshold=${matchThreshold}, matchCount=${matchCount}, ` +
-    `category=${category || "ALL"}, meeting_type=${meeting_type || "none"}, ` +
+    `projectId=${projectId || "none"}, meeting_type=${meeting_type || "none"}, ` +
     `date_from=${date_from || "none"}, date_to=${date_to || "none"}, ` +
     `allowedTagIds=${allowedTagIds ? JSON.stringify(allowedTagIds) : "none"}, ` +
     `error=${error ? JSON.stringify(error) : "none"}`

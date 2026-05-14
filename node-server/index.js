@@ -109,7 +109,8 @@ wss.on("connection", (clientWs, req) => {
   }
 
   const meetingToken = url.searchParams.get("meetingToken") || null;
-  console.log(`[relay] Connection: meetingToken=${meetingToken}`);
+  const projectId = url.searchParams.get("project") || null;
+  console.log(`[relay] Connection: meetingToken=${meetingToken}, projectId=${projectId}`);
 
   let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
 
@@ -220,7 +221,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Görev/aksiyon sorularında "görev", "aksiyon", "yapılacak", "atanan iş" gibi kelimeleri kullan.
 
 4. GÖREV VE AKSİYON SORULARI: "Gülfem'in görevleri nelerdi?" gibi sorularda:
-   - category: "transcripts" kullan
    - query'ye kişinin adını VE "görev aksiyon yapılacak atanan iş" kelimelerini ekle
    - Sonuçlardan SADECE görev atama, aksiyon belirleme veya iş dağılımı içeren kısımları cevapla
    - Başlığında "test" geçen toplantıları (örn. "KB Test", "Gülfem Solak test") görev kaynağı olarak KULLANMA — bunlar gerçek görev ataması içermez
@@ -231,7 +231,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Yeni soruda "ekip", "takım", "herkes", "biz", "neler yapılıyor" gibi GENEL ifadeler varsa → search_knowledge_base sorgusuna önceki kişinin adını EKLEME. Sorguyu genel tut.
    - Yeni soruda belirli bir kişi adı geçmiyorsa → önceki kişiyi varsayma, geniş kapsamlı ara.
    - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
-   - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.`;
+   - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.
+
+7. SONUÇ YOKSA VEYA DÜŞÜK EŞLEŞME: Bilgi tabanı araması boş sonuç döndürürse veya sonuçların benzerliği düşükse, "Bu konuda bilgi tabanımda kayıt bulamadım" de — kesinlikle uydurma, tahmin etme.`;
 
     // ── Fetch config and tag filter from main backend API ────────────────────
     const [apiConfig, resolvedTagIds] = await Promise.all([
@@ -483,7 +485,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
               console.log(`[relay] NORMAL response completed — going to sleep`);
             }
           } else if (status === "cancelled") {
-            console.log(`[relay] Response ${respId} was cancelled`);
+            awaitingToolFollowUp = false;
+            isAwake = false;
+            console.log(`[relay] Response ${respId} was cancelled — going to sleep`);
           }
         }
 
@@ -528,14 +532,14 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
             try {
               const args = JSON.parse(rawArgs);
               const results = await searchKnowledgeBase(args.query, {
-                category: args.category || null,
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
                 allowedTagIds,
+                projectId,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", category=${args.category || "ALL"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", projectId=${projectId || "none"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -565,8 +569,8 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       if (SUPPRESS_EVENTS.has(msg.type)) {
         return;
       }
-    } catch {
-      // JSON parse error — forward as-is
+    } catch (err) {
+      console.error("[relay] message handler error:", err);
     }
 
     // Forward everything else to client
@@ -659,9 +663,30 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
     });
 
     newOpenaiWs.on("message", async (data) => {
-      // Forward OpenAI messages to client using the same handler logic
+      const raw = data.toString();
+
+      if (wakeWordEnabled && !isAwake) {
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === "response.created") {
+            const respId = msg.response?.id || "unknown";
+            console.log(`[relay][reconnect] BLOCKING auto-response ${respId} (sleeping)`);
+            newOpenaiWs.send(JSON.stringify({ type: "response.cancel" }));
+            return;
+          }
+          if (
+            msg.type === "response.output_audio.delta" ||
+            msg.type === "response.audio.delta"
+          ) {
+            return;
+          }
+        } catch {
+          // not JSON — fall through and forward
+        }
+      }
+
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(data.toString());
+        clientWs.send(raw);
       }
     });
 
