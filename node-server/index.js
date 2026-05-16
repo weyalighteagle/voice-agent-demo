@@ -74,6 +74,11 @@ async function getAllowedTagIds(meetingToken) {
       }
     } catch (e) {
       console.error("[relay] getAllowedTagIds error:", e);
+      if (attempt < 3) {
+        console.log(`[relay] allowedTagIds fetch error on attempt ${attempt}, retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
       return null;
     }
   }
@@ -100,7 +105,7 @@ const httpServer = createServer((req, res) => {
 // ── WebSocket relay ───────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server: httpServer });
 
-wss.on("connection", (clientWs, req) => {
+wss.on("connection", async (clientWs, req) => {
   const url = new URL(req.url ?? "/", `https://localhost`);
   if (url.pathname !== "/") {
     console.log(`[relay] Rejected connection to unknown path: ${url.pathname}`);
@@ -112,13 +117,15 @@ wss.on("connection", (clientWs, req) => {
   const projectId = url.searchParams.get("project") || null;
   console.log(`[relay] Connection: meetingToken=${meetingToken}, projectId=${projectId}`);
 
-  let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
-
-  const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-  });
+  // ── Pre-fetch config and tag IDs BEFORE opening the OpenAI WebSocket ─────────
+  // This guarantees session.update is sent synchronously inside openaiWs.on("open"),
+  // before any client audio can reach OpenAI — preventing the cannot_update_voice race.
+  const [apiConfig, resolvedTagIds] = await Promise.all([
+    fetchVoiceAgentConfig(),
+    getAllowedTagIds(meetingToken),
+  ]);
+  let allowedTagIds = resolvedTagIds;
+  console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
 
   let openaiReconnecting = false;   // true while a reconnect attempt is in progress
   let clientAlive = true;           // false after clientWs closes — prevents reconnect
@@ -142,7 +149,13 @@ wss.on("connection", (clientWs, req) => {
     console.log(`[state] ${context} | awake=${isAwake} pending=${pendingManualResponse} resp=${activeResponseId || "none"} toolFollowUp=${awaitingToolFollowUp}`);
   }
 
-  openaiWs.on("open", async () => {
+  const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+  });
+
+  openaiWs.on("open", () => {
     console.log("[relay] Connected to OpenAI Realtime API");
 
     const HARDCODED_INSTRUCTIONS = `# WEYA — Light Eagle Dijital Ekip Üyesi
@@ -234,14 +247,6 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.
 
 7. SONUÇ YOKSA VEYA DÜŞÜK EŞLEŞME: Bilgi tabanı araması boş sonuç döndürürse veya sonuçların benzerliği düşükse, "Bu konuda bilgi tabanımda kayıt bulamadım" de — kesinlikle uydurma, tahmin etme.`;
-
-    // ── Fetch config and tag filter from main backend API ────────────────────
-    const [apiConfig, resolvedTagIds] = await Promise.all([
-      fetchVoiceAgentConfig(),
-      getAllowedTagIds(meetingToken),
-    ]);
-    allowedTagIds = resolvedTagIds;
-    console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
 
     let instructions, voice, language;
     if (apiConfig) {
