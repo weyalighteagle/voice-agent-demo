@@ -24,7 +24,6 @@ export default function App() {
   const params = new URLSearchParams(window.location.search);
   const relayUrl = params.get("wss");
   const meetingToken = params.get("meetingToken");
-  const projectId = params.get("project");
 
   // ── Audio playback ────────────────────────────────────────────────────────
   const playNextChunk = useCallback(async () => {
@@ -96,11 +95,7 @@ export default function App() {
 
     audioCtxRef.current = new AudioContext({ sampleRate: 24000 });
 
-    const wsParams = new URLSearchParams();
-    if (meetingToken) wsParams.set("meetingToken", meetingToken);
-    if (projectId) wsParams.set("project", projectId);
-    const wsQuery = wsParams.toString();
-    const wsUrl = wsQuery ? `${relayUrl}?${wsQuery}` : relayUrl!;
+    const wsUrl = meetingToken ? `${relayUrl}?meetingToken=${meetingToken}` : relayUrl!;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     ws.binaryType = "arraybuffer";
@@ -230,7 +225,7 @@ export default function App() {
       setStatus("error");
       setStatusDetail(`Failed to connect to: ${relayUrl}`);
     };
-  }, [relayUrl, meetingToken, projectId, playNextChunk, clearPlaybackQueue]);
+  }, [relayUrl, playNextChunk, clearPlaybackQueue]);
 
   useEffect(() => {
     shouldReconnectRef.current = true;
