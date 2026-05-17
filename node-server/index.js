@@ -50,37 +50,6 @@ const SUPPRESS_EVENTS = new Set([
   "response.function_call_arguments.done",
 ]);
 
-// ── Fetch allowed tag IDs for a bot from the main backend ─────────────────────
-async function getAllowedTagIds(meetingToken) {
-  if (!meetingToken || !BACKEND_API_URL) return null;
-
-  // Retry up to 3 times with 2s delay — the tag assignment from the frontend's
-  // PUT /api/meetings/:botId/tags call may arrive slightly after the relay connects.
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(
-        `${BACKEND_API_URL}/api/relay/allowed-tags?token=${meetingToken}`,
-        { headers: { "x-api-key": BACKEND_API_KEY } }
-      );
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (data.tag_ids !== null) {
-        console.log(`[relay] allowedTagIds resolved on attempt ${attempt}`);
-        return data.tag_ids;
-      }
-      if (attempt < 3) {
-        console.log(`[relay] allowedTagIds null on attempt ${attempt}, retrying in 2s...`);
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    } catch (e) {
-      console.error("[relay] getAllowedTagIds error:", e);
-      return null;
-    }
-  }
-  console.log(`[relay] allowedTagIds still null after 3 attempts — no filter applied`);
-  return null;
-}
-
 // ── HTTP health endpoint ──────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
@@ -108,11 +77,8 @@ wss.on("connection", (clientWs, req) => {
     return;
   }
 
-  const meetingToken = url.searchParams.get("meetingToken") || null;
   const projectId = url.searchParams.get("project") || null;
-  console.log(`[relay] Connection: meetingToken=${meetingToken}, projectId=${projectId}`);
-
-  let allowedTagIds = null; // set in openaiWs.on("open") after async fetch
+  console.log(`[relay] Connection: projectId=${projectId}`);
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -235,13 +201,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
 7. SONUÇ YOKSA VEYA DÜŞÜK EŞLEŞME: Bilgi tabanı araması boş sonuç döndürürse veya sonuçların benzerliği düşükse, "Bu konuda bilgi tabanımda kayıt bulamadım" de — kesinlikle uydurma, tahmin etme.`;
 
-    // ── Fetch config and tag filter from main backend API ────────────────────
-    const [apiConfig, resolvedTagIds] = await Promise.all([
-      fetchVoiceAgentConfig(),
-      getAllowedTagIds(meetingToken),
-    ]);
-    allowedTagIds = resolvedTagIds;
-    console.log(`[relay] allowedTagIds for token ${meetingToken}:`, allowedTagIds);
+    // ── Fetch config from main backend API ───────────────────────────────────
+    const apiConfig = await fetchVoiceAgentConfig();
+    console.log(`[relay] KB mode: ${projectId ? `project (projectId=${projectId})` : "none"}`);
 
     let instructions, voice, language;
     if (apiConfig) {
@@ -570,11 +532,10 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_from: args.date_from || null,
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
-                allowedTagIds,
                 projectId,
               });
               toolResult = formatKBResults(results);
-              console.log(`[relay] KB search: query="${args.query}", projectId=${projectId || "none"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, allowedTagIds=${JSON.stringify(allowedTagIds)}, results=${results.length}`);
+              console.log(`[relay] KB search: query="${args.query}", projectId=${projectId || "none"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";

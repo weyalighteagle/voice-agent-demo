@@ -1,7 +1,7 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
-export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, allowedTagIds = null, projectId = null } = {}) {
+export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, projectId = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -33,21 +33,15 @@ export async function searchKnowledgeBase(query, { date_from = null, date_to = n
     rpcParams.filter_project_id = projectId;
   }
 
-  // Only send p_allowed_tag_ids when there is a real list — passing null causes a
-  // Supabase RPC type mismatch (uuid[] vs null literal) that silently returns 0 rows.
-  if (Array.isArray(allowedTagIds) && allowedTagIds.length > 0) {
-    rpcParams.p_allowed_tag_ids = allowedTagIds;
-  }
-
   const { data, error } = await supabase.rpc("search_knowledge_base", rpcParams);
 
   const tSearch = Date.now();
+  const kbMode = projectId ? "project" : "none";
   console.log(
-    `[kb] Search: embed=${tEmbed - t0}ms, search=${tSearch - tEmbed}ms, total=${tSearch - t0}ms, ` +
+    `[kb] Search: mode=${kbMode}, embed=${tEmbed - t0}ms, search=${tSearch - tEmbed}ms, total=${tSearch - t0}ms, ` +
     `results=${data?.length ?? 0}, threshold=${matchThreshold}, matchCount=${matchCount}, ` +
     `projectId=${projectId || "none"}, meeting_type=${meeting_type || "none"}, ` +
     `date_from=${date_from || "none"}, date_to=${date_to || "none"}, ` +
-    `allowedTagIds=${allowedTagIds ? JSON.stringify(allowedTagIds) : "none"}, ` +
     `error=${error ? JSON.stringify(error) : "none"}`
   );
 
