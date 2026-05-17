@@ -95,7 +95,10 @@ export default function App() {
 
     audioCtxRef.current = new AudioContext({ sampleRate: 24000 });
 
-    const wsUrl = meetingToken ? `${relayUrl}?meetingToken=${meetingToken}` : relayUrl!;
+    const projectId = params.get("project");
+    const wsUrl = meetingToken
+      ? `${relayUrl}?meetingToken=${meetingToken}${projectId ? `&project=${projectId}` : ""}`
+      : relayUrl!;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
     ws.binaryType = "arraybuffer";
