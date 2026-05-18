@@ -39,7 +39,7 @@ if not OPENAI_API_KEY:
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 KB_EMBEDDING_MODEL = os.getenv("KB_EMBEDDING_MODEL", "text-embedding-3-small")
-KB_MATCH_THRESHOLD = float(os.getenv("KB_MATCH_THRESHOLD", "0.0"))
+KB_MATCH_THRESHOLD = float(os.getenv("KB_MATCH_THRESHOLD", "0.5"))
 KB_MATCH_COUNT = int(os.getenv("KB_MATCH_COUNT", "10"))
 
 KB_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_KEY and HAS_KB_DEPS)
@@ -69,53 +69,8 @@ TOOLS = [
                     "type": "string",
                     "description": "Aranacak sorgu metni. Kullanıcının sorusunun kısa ve net bir özeti.",
                 },
-                "category": {
-                    "type": "string",
-                    "enum": ["company_docs", "faq", "crm", "transcripts"],
-                    "description": (
-                        "Opsiyonel kategori filtresi. Sadece kesin olduğunda kullan. "
-                        "Emin değilsen bu parametreyi GÖNDERMEKSİZİN bırak — tüm kategorilerde aranır. "
-                        "Seçenekler: 'company_docs' → şirket dökümanları; 'faq' → ürün bilgisi; "
-                        "'crm' → müşteri bilgileri; 'transcripts' → toplantı kayıtları."
-                    ),
-                },
-                "meeting_title": {
-                    "type": "string",
-                    "description": (
-                        "Toplantı başlığı ile filtreleme. Kullanıcı belirli bir toplantıdan bahsettiğinde "
-                        "(örn. 'Coherus toplantısı', 'standup toplantısı') bu parametreyi kullan. "
-                        "Başlığın tam olarak eşleşmesi gerekmez, kısmi eşleşme yeterlidir."
-                    ),
-                },
-                "meeting_type": {
-                    "type": "string",
-                    "description": (
-                        "Toplantı türü ile filtreleme (snake_case). Sadece category='transcripts' ile kullan. "
-                        "Kullanıcı 'yapay zeka takım toplantısı', 'sprint planning' gibi belirli bir toplantı "
-                        "türünden bahsediyorsa bu parametreyi doldur. "
-                        "Örnekler: 'yapay_zeka_takim_toplantisi', 'sprint_planning', 'weekly_standup'. "
-                        "Bilinmiyorsa bu parametreyi gönderme — meeting_title kullan."
-                    ),
-                },
-                "date_from": {
-                    "type": "string",
-                    "description": (
-                        "Başlangıç tarihi (ISO 8601 format, örn: '2026-03-27T00:00:00Z'). "
-                        "Kullanıcı 'geçen hafta', 'dün', 'geçen Cuma' gibi ifadeler kullandığında "
-                        "bugünün tarihini referans alarak uygun ISO tarihini hesapla. "
-                        "Tarih belirtilmemişse bu parametreyi gönderme."
-                    ),
-                },
-                "date_to": {
-                    "type": "string",
-                    "description": (
-                        "Bitiş tarihi (ISO 8601 format, örn: '2026-03-28T23:59:59Z'). "
-                        "Kullanıcı 'geçen hafta' derse haftanın son gününü, 'dün' derse dünün sonunu yaz. "
-                        "Tarih belirtilmemişse bu parametreyi gönderme."
-                    ),
-                },
             },
-            "required": ["query", "category"],
+            "required": ["query"],
         },
     },
 ]
@@ -189,12 +144,7 @@ async def get_allowed_tag_ids(meeting_token: str | None) -> list | None:
 
 async def search_knowledge_base(
     query: str,
-    category: str | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    meeting_title: str | None = None,
-    meeting_type: str | None = None,
-    allowed_tag_ids: list | None = None,
+    project_id: str | None = None,
 ) -> str:
     """Search the KB via Supabase RPC and return formatted results."""
     if not KB_ENABLED or not supabase or not openai_client:
@@ -208,29 +158,20 @@ async def search_knowledge_base(
         )
         query_embedding = embed_response.data[0].embedding
 
-        has_context_filter = any([date_from, date_to, meeting_title, meeting_type])
-        effective_threshold = min(KB_MATCH_THRESHOLD, 0.1) if has_context_filter else KB_MATCH_THRESHOLD
-        effective_match_count = max(KB_MATCH_COUNT, 10) if (date_from or date_to) else KB_MATCH_COUNT
-
         # Search via Supabase RPC
         rpc_params = {
             "query_embedding": json.dumps(query_embedding),
-            "match_threshold": effective_threshold,
-            "match_count": effective_match_count,
-            "filter_category": category,
-            "filter_date_from": date_from,
-            "filter_date_to": date_to,
-            "filter_meeting_type": meeting_type,
-            "filter_meeting_title": meeting_title,
-            "p_allowed_tag_ids": allowed_tag_ids,
+            "match_threshold": KB_MATCH_THRESHOLD,
+            "match_count": KB_MATCH_COUNT,
         }
+        if project_id:
+            rpc_params["filter_project_id"] = project_id
+
         result = supabase.rpc("search_knowledge_base", rpc_params).execute()
 
         data = result.data or []
         logger.info(
-            f'[kb] Search: query="{query}", category={category or "ALL"}, '
-            f'meeting_title={meeting_title or "none"}, meeting_type={meeting_type or "none"}, '
-            f'date_from={date_from or "none"}, date_to={date_to or "none"}, results={len(data)}'
+            f'[kb] Search: query="{query}", projectId={project_id or "none"}, results={len(data)}'
         )
 
         if not data:
@@ -269,7 +210,7 @@ async def search_knowledge_base(
 
 
 # ─── Handle tool calls from OpenAI ───────────────────────────────────────────
-async def handle_tool_call(openai_ws, msg: dict, allowed_tag_ids: list | None = None):
+async def handle_tool_call(openai_ws, msg: dict, project_id: str | None = None):
     """Process a completed function call and send the result back to OpenAI."""
     call_id = msg.get("call_id")
     name = msg.get("name")
@@ -284,12 +225,7 @@ async def handle_tool_call(openai_ws, msg: dict, allowed_tag_ids: list | None = 
             args = json.loads(raw_args)
             tool_result = await search_knowledge_base(
                 args.get("query", ""),
-                category=args.get("category"),
-                date_from=args.get("date_from"),
-                date_to=args.get("date_to"),
-                meeting_title=args.get("meeting_title"),
-                meeting_type=args.get("meeting_type"),
-                allowed_tag_ids=allowed_tag_ids,
+                project_id=project_id,
             )
         except Exception as e:
             logger.error(f"[relay] KB search error: {e}")
@@ -388,7 +324,8 @@ class WebSocketRelay:
         parsed = urlparse(path)
         params = parse_qs(parsed.query)
         meeting_token = params.get("meetingToken", [None])[0]
-        logger.info(f"[relay] Connection: meetingToken={meeting_token}")
+        project_id = params.get("project", [None])[0]
+        logger.info(f"[relay] Connection: meetingToken={meeting_token}, projectId={project_id}")
 
         allowed_tag_ids = await get_allowed_tag_ids(meeting_token)
         logger.info(f"[relay] allowedTagIds for token {meeting_token}: {allowed_tag_ids}")
@@ -441,7 +378,7 @@ class WebSocketRelay:
 
                             # ── Intercept completed tool calls ──
                             if msg_type == "response.function_call_arguments.done":
-                                await handle_tool_call(openai_ws, msg, allowed_tag_ids=allowed_tag_ids)
+                                await handle_tool_call(openai_ws, msg, project_id=project_id)
                                 continue  # Don't forward to client
 
                             # ── Suppress noisy tool-call events ──
