@@ -338,6 +338,19 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       if (msg.type === "input_audio_buffer.speech_started") {
         console.log(`[vad] Speech started`);
         logState("speech-start");
+        // ▸ BARGE-IN: user spoke during a live bot response — cancel it.
+        // Gated on activeResponseId && isAwake so this only fires for
+        // legitimate, in-flight responses. It will NOT fire for:
+        //   - idle sleeping state (activeResponseId = null)
+        //   - relay-blocked auto-responses (isAwake = false)
+        //   - the gap between tool result and tool follow-up response.created
+        //     (activeResponseId = null)
+        // The existing `status === "cancelled"` branch in response.done
+        // handles state cleanup (isAwake=false, awaitingToolFollowUp=false).
+        if (activeResponseId && isAwake) {
+          console.log(`[relay] BARGE-IN — user spoke during response ${activeResponseId}, cancelling`);
+          openaiWs.send(JSON.stringify({ type: "response.cancel" }));
+        }
       }
       if (msg.type === "input_audio_buffer.speech_stopped") {
         console.log(`[vad] Speech stopped`);
