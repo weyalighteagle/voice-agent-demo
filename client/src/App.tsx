@@ -115,14 +115,6 @@ export default function App() {
       processor.onaudioprocess = (e) => {
         if (ws.readyState !== WebSocket.OPEN) return;
 
-        // ── BOT KONUŞURKEN MİKROFON GÖNDERİMİNİ DURDUR ──────────────────
-        // Bot'un kendi sesini input olarak algılamasını (echo) önler.
-        // isPlayingRef: ses çıkışı aktif mi
-        // isRespondingRef: OpenAI'dan response akışı devam ediyor mu
-        if (isPlayingRef.current || isRespondingRef.current) {
-          return;
-        }
-
         const float32 = e.inputBuffer.getChannelData(0);
         // Convert Float32 → PCM16 little-endian
         const pcm16 = new Int16Array(float32.length);
