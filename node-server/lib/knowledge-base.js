@@ -15,9 +15,9 @@ export async function searchKnowledgeBase(query, { date_from = null, date_to = n
 
   const embeddingStr = `[${queryEmbedding.join(",")}]`;
 
-  const matchCount = 10;
-  // 0.5 threshold — only return chunks with meaningful semantic overlap; filters irrelevant noise
-  const matchThreshold = 0.5;
+  const matchCount = 15;
+  // 0.3 threshold — lowered from 0.5; date-filtered queries (e.g. specific meeting days) hit 0.48-0.51 similarity
+  const matchThreshold = 0.3;
 
   const rpcParams = {
     query_embedding: embeddingStr,
