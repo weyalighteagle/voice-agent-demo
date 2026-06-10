@@ -171,7 +171,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
 ## KRİTİK SORGULAMA KURALLARI
 
-1. TARİH FİLTRESİ: Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. "Geçen toplantı" / "en son toplantı" → date_from: 14 gün önce, date_to: bugün. Tarih belirtilmemişse parametreleri boş bırak.
+1. TARİH FİLTRESİ: Geçmiş toplantılarla ilgili sorularda MUTLAKA date_from ve date_to parametrelerini kullan. "Geçen hafta" → geçen haftanın Pazartesi 00:00 ile Pazar 23:59 aralığı. "Dün" → dünün 00:00-23:59 aralığı. "Geçen Cuma" → en son Cuma'nın tarihi. "Geçen toplantı" / "en son toplantı" → date_from: 14 gün önce, date_to: bugün. KRİTİK: "geçen" kelimesi toplantı bağlamında ASLA "geçen yıl" anlamına gelmez. - "geçen toplantı" / "geçen yapılan toplantı" / "en son toplantı" = son 7 gün (date_from: 7 gün önce, date_to: bugün). - Yıl bazlı arama SADECE kullanıcı açıkça "2025'te", "geçen yıl", "geçen sene" derse yapılır. - Emin değilsen son 7 günü kullan, yılı değil. Tarih belirtilmemişse parametreleri boş bırak.
 
 2. TOPLANTI TÜRÜ EŞLEŞTİRME: Kullanıcı belirli bir toplantı türünden bahsettiğinde meeting_type parametresini MUTLAKA doldur:
    - "yapay zeka takım toplantısı" / "yapay zeka toplantısı" / "AI toplantısı" / "haftalık toplantı" → meeting_type: "light_eagle_yapay_zeka_takim_toplantisi"
@@ -199,7 +199,9 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
    - Arama sonuçlarından cevap verirken de aynı kural geçerli: sonuçlarda birden fazla kişi varsa HEPSİNDEN bahset, sadece önceki sorudaki kişiye odaklanma.
    - Örnek: Önceki soru "Gülfem ne yaptı?" → Yeni soru "Ekip ne yapıyor?" → Sorgu: "ekip Weya geliştirme çalışmaları" (Gülfem'i dahil ETME). Cevap: tüm ekip üyelerinin katkılarını içersin.
 
-7. SONUÇ YOKSA VEYA DÜŞÜK EŞLEŞME: Bilgi tabanı araması boş sonuç döndürürse veya sonuçların benzerliği düşükse, "Bu konuda bilgi tabanımda kayıt bulamadım" de — kesinlikle uydurma, tahmin etme.`;
+7. SONUÇ YOKSA VEYA DÜŞÜK EŞLEŞME: Bilgi tabanı araması boş sonuç döndürürse veya sonuçların benzerliği düşükse, "Bu konuda bilgi tabanımda kayıt bulamadım" de — kesinlikle uydurma, tahmin etme.
+
+8. SONUÇ SEÇİMİ: "Geçen", "en son", "son", "bir önceki" gibi ifadeler kullanıldığında, arama sonuçlarından EN YENİ TARİHLİ olanları kullan. Eski tarihli sonuçları görmezden gel. Bugünkü toplantı sırasında "geçen toplantı" denirse, bugünkü toplantı DEĞİL bir önceki gündeki toplantı kastedilir. Bugünün tarihindeki toplantı sonuçlarını "geçen toplantı" olarak SUNMA.`;
 
     // ── Fetch config from main backend API ───────────────────────────────────
     const apiConfig = await fetchVoiceAgentConfig();
