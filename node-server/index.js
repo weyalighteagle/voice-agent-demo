@@ -78,7 +78,8 @@ wss.on("connection", (clientWs, req) => {
   }
 
   const projectId = url.searchParams.get("project") || null;
-  console.log(`[relay] Connection: projectId=${projectId}`);
+  const userEmail = url.searchParams.get("user_email") || null;
+  console.log(`[relay] Connection: projectId=${projectId}, userEmail=${userEmail}`);
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -546,6 +547,7 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
                 projectId,
+                userEmail,
               });
               toolResult = formatKBResults(results);
               console.log(`[relay] KB search: query="${args.query}", projectId=${projectId || "none"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);

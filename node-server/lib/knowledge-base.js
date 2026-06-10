@@ -1,7 +1,8 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
+import { filterSharedResults } from "./sharingFilter.js";
 
-export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, projectId = null } = {}) {
+export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, projectId = null, userEmail = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -57,7 +58,12 @@ export async function searchKnowledgeBase(query, { date_from = null, date_to = n
     return [];
   }
 
-  return data || [];
+  const results = filterSharedResults(data || [], {
+    mode: "attribution_controlled",
+    requestingUserEmail: userEmail || "",
+  });
+
+  return results;
 }
 
 export function formatKBResults(results) {
@@ -92,11 +98,16 @@ export function formatKBResults(results) {
     .map((r, i) => {
       const sim = ((r.similarity || 0) * 100).toFixed(0);
       const type = r.source_type === "transcript" ? "📋 Toplantı Kaydı" : "📄 Şirket Dokümanı";
-      const rawDate = r.meeting_date ? new Date(r.meeting_date) : null;
+      const rawDate = r.meeting_date
+        ? new Date(r.meeting_date)
+        : (r.document_date ? new Date(r.document_date) : null);
       const dateStr = rawDate && rawDate.getFullYear() >= 2020
         ? rawDate.toLocaleDateString("tr-TR", { year: "numeric", month: "long", day: "numeric", weekday: "long" })
         : "⚠️ Tarih bilinmiyor";
-      return `[Kaynak ${i + 1} | ${type} | ${r.document_title} | ${dateStr} | Benzerlik: %${sim}]:\n${r.content}`;
+      const brokeredLine = r.brokerableConnection
+        ? "\n🔗 A team member has context on this topic — brokered introduction available"
+        : "";
+      return `[Kaynak ${i + 1} | ${type} | ${r.document_title} | ${dateStr} | Benzerlik: %${sim}]:\n${r.content}${brokeredLine}`;
     })
     .join("\n\n---\n\n");
 
