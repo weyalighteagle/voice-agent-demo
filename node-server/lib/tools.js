@@ -56,4 +56,24 @@ export const TOOLS = [
       required: ["query"],
     },
   },
+  {
+    type: "function",
+    name: "request_introduction",
+    description:
+      "Kullanıcı bir takım üyesiyle tanışmak istediğinde bu aracı çağır. Yalnızca brokerableConnection=true olan bir bilgi kaynağı sunulduktan ve kullanıcı 'tanıştır', 'evet', 'introduce me' gibi bir onay verdikten sonra kullan.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Tanıştırma talebini tetikleyen orijinal arama sorgusu.",
+        },
+        source_summary: {
+          type: "string",
+          description: "Hangi bilgi kaynağının tanıştırmayı tetiklediğinin kısa özeti.",
+        },
+      },
+      required: ["query"],
+    },
+  },
 ];

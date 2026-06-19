@@ -1,7 +1,11 @@
 import supabase from "./supabase.js";
 import { createEmbedding } from "./embeddings.js";
 
-export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, projectId = null } = {}) {
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export async function searchKnowledgeBase(query, { date_from = null, date_to = null, meeting_type = null, projectId = null, userEmail = null } = {}) {
   if (!supabase) {
     console.warn("[kb] Supabase client not initialized");
     return [];
@@ -57,7 +61,35 @@ export async function searchKnowledgeBase(query, { date_from = null, date_to = n
     return [];
   }
 
-  return data || [];
+  let results = data || [];
+
+  // Attribution filtering for shared project results (Option B)
+  if (userEmail && results.length > 0) {
+    results = results.map((result) => {
+      if (result.contributor_email && result.contributor_email !== userEmail) {
+        let filteredContent = result.content;
+        filteredContent = filteredContent.replace(new RegExp(escapeRegex(result.contributor_email), 'gi'), 'bir takım üyesi');
+
+        // Also strip contributor name from content if it appears
+        // (contributor name might be part of the email prefix)
+        const emailPrefix = result.contributor_email.split('@')[0];
+        if (emailPrefix.length > 2) {
+          filteredContent = filteredContent.replace(new RegExp(escapeRegex(emailPrefix), 'gi'), 'bir takım üyesi');
+        }
+
+        return {
+          ...result,
+          content: filteredContent,
+          contributor_email: null, // strip identity
+          brokerableConnection: true,
+          original_contributor_email: result.contributor_email, // keep for introduction request
+        };
+      }
+      return { ...result, brokerableConnection: false };
+    });
+  }
+
+  return results;
 }
 
 export function formatKBResults(results) {
@@ -91,11 +123,17 @@ export function formatKBResults(results) {
   const formatted = filtered
     .map((r, i) => {
       const sim = ((r.similarity || 0) * 100).toFixed(0);
-      const type = r.source_type === "transcript" ? "📋 Toplantı Kaydı" : "📄 Şirket Dokümanı";
       const rawDate = r.meeting_date ? new Date(r.meeting_date) : null;
       const dateStr = rawDate && rawDate.getFullYear() >= 2020
         ? rawDate.toLocaleDateString("tr-TR", { year: "numeric", month: "long", day: "numeric", weekday: "long" })
         : "⚠️ Tarih bilinmiyor";
+
+      if (r.brokerableConnection) {
+        // Brokered result — anonymized attribution (Option B)
+        return `[Kaynak ${i + 1} | Paylaşılan bilgi — bir takım üyesi | ${dateStr} | Benzerlik: %${sim}]:\n${r.content}\n⚡ brokerableConnection=true`;
+      }
+
+      const type = r.source_type === "transcript" ? "📋 Toplantı Kaydı" : "📄 Şirket Dokümanı";
       return `[Kaynak ${i + 1} | ${type} | ${r.document_title} | ${dateStr} | Benzerlik: %${sim}]:\n${r.content}`;
     })
     .join("\n\n---\n\n");

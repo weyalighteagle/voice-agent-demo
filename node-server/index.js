@@ -5,6 +5,7 @@ import { TOOLS } from "./lib/tools.js";
 import { searchKnowledgeBase, formatKBResults } from "./lib/knowledge-base.js";
 import { fetchVoiceAgentConfig } from "./lib/fetch-config.js";
 import { containsWakeWord } from "./lib/wake-word.js";
+import supabase from "./lib/supabase.js";
 
 dotenv.config();
 
@@ -78,7 +79,9 @@ wss.on("connection", (clientWs, req) => {
   }
 
   const projectId = url.searchParams.get("project") || null;
+  const userEmail = url.searchParams.get("userEmail") || null;
   console.log(`[relay] Connection: projectId=${projectId}`);
+  console.log(`[relay] User email: ${userEmail || "not provided"}`);
 
   const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
     headers: {
@@ -102,6 +105,7 @@ wss.on("connection", (clientWs, req) => {
   let activeResponseId = null;       // currently active response ID (to avoid cancel spam)
   let awaitingToolFollowUp = false;  // true = tool call done, waiting for follow-up response
   let sessionUpdate = null;         // holds session config for reconnect
+  let lastBrokeredContributor = null; // contributor_email of the most recent brokered KB result (for request_introduction)
 
   // ▸ DEBUG — structured state logger
   function logState(context) {
@@ -240,6 +244,18 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
 
     if (wakeWordEnabled) {
       instructions += `\n\n---\n\n## WAKE WORD KURALI\nBu toplantıda yalnızca biri "${wakeWord}" dediğinde cevap ver. "${wakeWord}" kelimesini duyana kadar sessiz kal, konuşmayı dinle ama müdahale etme. "${wakeWord}" dediklerinde hemen ardından gelen soruya veya talimata cevap ver. Sadece çağrıldığında konuş.`;
+    }
+
+    // ▸ BROKERED SURFACING — inject rules for shared project attribution
+    if (KB_ENABLED) {
+      instructions += `\n\n---\n\n## BROKERED SURFACING KURALLARI
+Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğünde:
+- Bu bilgiyi şu şekilde sun: "Bir takım üyesi [konu] hakkında [tarih] konuşmuş — sizi tanıştırmamı ister misiniz?"
+- Katkıda bulunan kişinin ismini, e-postasını veya ham transkript içeriğini ASLA açıklama
+- Kullanıcı "evet", "tanıştır", "introduce me" derse → request_introduction aracını çağır
+- Kullanıcı ilgilenmezse → ısrar etme, konuya devam et
+- Sonuçtaki konu ve şirket bilgilerini paylaşabilirsin, ama kişisel atıf bilgilerini paylaşma
+- brokerableConnection=true OLMAYAN sonuçlar için normal şekilde cevap ver, bu kuralları uygulama`;
     }
 
     transcriptionPrompt = buildTranscriptionPrompt(language, wakeWord);
@@ -548,13 +564,50 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
                 date_to: args.date_to || null,
                 meeting_type: args.meeting_type || null,
                 projectId,
+                userEmail,
               });
               toolResult = formatKBResults(results);
               console.log(`[relay] KB search: query="${args.query}", projectId=${projectId || "none"}, meeting_type=${args.meeting_type || "none"}, date_from=${args.date_from || "none"}, date_to=${args.date_to || "none"}, results=${results.length}`);
+
+              // Track the most recent brokered result so request_introduction can resolve a contributor
+              const brokeredResult = results.find(r => r.brokerableConnection && r.original_contributor_email);
+              lastBrokeredContributor = brokeredResult ? brokeredResult.original_contributor_email : null;
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
             }
+          }
+        } else if (name === "request_introduction") {
+          try {
+            const args = JSON.parse(rawArgs);
+
+            if (!userEmail || !projectId) {
+              toolResult = "Tanıştırma talebi kaydedilemedi — kullanıcı veya proje bilgisi eksik.";
+              console.log("[relay] Introduction request failed — missing userEmail or projectId");
+            } else {
+              const contributorEmail = lastBrokeredContributor || "unknown";
+
+              const { error } = await supabase
+                .from("introduction_requests")
+                .insert({
+                  requester_email: userEmail,
+                  contributor_email: contributorEmail,
+                  project_id: projectId,
+                  query_text: args.query || null,
+                  status: "pending",
+                });
+
+              if (error) {
+                console.error("[relay] Introduction request insert error:", error);
+                toolResult = "Tanıştırma talebi kaydedilirken bir hata oluştu. Lütfen tekrar deneyin.";
+              } else {
+                console.log(`[relay] Introduction request recorded: ${userEmail} → ${contributorEmail} in project ${projectId}`);
+                toolResult = "Tanıştırma talebiniz kaydedildi. Takım üyenize bildirim göndereceğiz ve size geri dönüş yapacağız.";
+              }
+            }
+          } catch (err) {
+            console.error("[relay] Introduction request error:", err);
+            toolResult = "Tanıştırma talebi işlenirken bir hata oluştu.";
           }
         } else {
           toolResult = `Bilinmeyen araç: ${name}`;
