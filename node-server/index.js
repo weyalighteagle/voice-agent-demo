@@ -251,10 +251,11 @@ Toplantıya bağlandığında kısa ve sıcak bir şekilde kendini tanıt:
       instructions += `\n\n---\n\n## BROKERED SURFACING KURALLARI
 Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğünde:
 - Bu bilgiyi şu şekilde sun: "Bir takım üyesi [konu] hakkında [tarih] konuşmuş — sizi tanıştırmamı ister misiniz?"
-- Katkıda bulunan kişinin ismini, e-postasını veya ham transkript içeriğini ASLA açıklama
+- Katkıda bulunan kişinin ismini, e-postasını veya ham transkript içeriğini henüz AÇIKLAMA — önce tanıştırma teklifi yap
 - Kullanıcı "evet", "tanıştır", "introduce me" derse → request_introduction aracını çağır
+- request_introduction aracı sana kişinin adını, e-postasını ve bağlam bilgisini döndürecek
+- Bu bilgileri kullanarak kişiyi tanıt: adını söyle, neden ilgili olduğunu açıkla, nasıl iletişim kurabileceklerini öner
 - Kullanıcı ilgilenmezse → ısrar etme, konuya devam et
-- Sonuçtaki konu ve şirket bilgilerini paylaşabilirsin, ama kişisel atıf bilgilerini paylaşma
 - brokerableConnection=true OLMAYAN sonuçlar için normal şekilde cevap ver, bu kuralları uygulama`;
     }
 
@@ -571,7 +572,31 @@ Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğ
 
               // Track the most recent brokered result so request_introduction can resolve a contributor
               const brokeredResult = results.find(r => r.brokerableConnection && r.original_contributor_email);
-              lastBrokeredContributor = brokeredResult ? brokeredResult.original_contributor_email : null;
+              if (brokeredResult) {
+                // Extract contributor name from document title (format: "Toplantı — DATE — NAME")
+                let contributorName = null;
+                if (brokeredResult.original_document_title) {
+                  const titleParts = brokeredResult.original_document_title.split(' — ');
+                  if (titleParts.length >= 3) {
+                    contributorName = titleParts[titleParts.length - 1].trim();
+                  }
+                }
+                // Fallback: use email prefix as name
+                if (!contributorName) {
+                  const prefix = brokeredResult.original_contributor_email.split('@')[0];
+                  contributorName = prefix.charAt(0).toUpperCase() + prefix.slice(1);
+                }
+
+                lastBrokeredContributor = {
+                  email: brokeredResult.original_contributor_email,
+                  name: contributorName,
+                  documentTitle: brokeredResult.original_document_title || null,
+                  contentSnippet: brokeredResult.original_content_snippet || null,
+                  meetingDate: brokeredResult.meeting_date || null,
+                };
+              } else {
+                lastBrokeredContributor = null;
+              }
             } catch (err) {
               console.error("[relay] KB search error:", err);
               toolResult = "Bilgi tabanı aramasında bir hata oluştu. Kendi bilginle cevap ver.";
@@ -585,13 +610,13 @@ Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğ
               toolResult = "Tanıştırma talebi kaydedilemedi — kullanıcı veya proje bilgisi eksik.";
               console.log("[relay] Introduction request failed — missing userEmail or projectId");
             } else {
-              const contributorEmail = lastBrokeredContributor || "unknown";
+              const contributorEmailForDB = (lastBrokeredContributor && lastBrokeredContributor.email) || "unknown";
 
               const { error } = await supabase
                 .from("introduction_requests")
                 .insert({
                   requester_email: userEmail,
-                  contributor_email: contributorEmail,
+                  contributor_email: contributorEmailForDB,
                   project_id: projectId,
                   query_text: args.query || null,
                   status: "pending",
@@ -601,8 +626,30 @@ Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğ
                 console.error("[relay] Introduction request insert error:", error);
                 toolResult = "Tanıştırma talebi kaydedilirken bir hata oluştu. Lütfen tekrar deneyin.";
               } else {
-                console.log(`[relay] Introduction request recorded: ${userEmail} → ${contributorEmail} in project ${projectId}`);
-                toolResult = "Tanıştırma talebiniz kaydedildi. Takım üyenize bildirim göndereceğiz ve size geri dönüş yapacağız.";
+                console.log(`[relay] Introduction request recorded: ${userEmail} → ${contributorEmailForDB} in project ${projectId}`);
+
+                const contributor = lastBrokeredContributor || {};
+                const contributorName = contributor.name || "Bilinmeyen";
+                const contributorEmail = contributor.email || contributorEmailForDB;
+                const meetingDate = contributor.meetingDate || "bilinmeyen tarih";
+                const contentSnippet = contributor.contentSnippet || "";
+
+                toolResult = `TANITIM BİLGİLERİ:
+İsim: ${contributorName}
+E-posta: ${contributorEmail}
+İlgili toplantı: ${contributor.documentTitle || "bilinmiyor"}
+Toplantı tarihi: ${meetingDate}
+
+BAĞLAM (kullanıcının sorusuyla ilgili kısım):
+${contentSnippet}
+
+GÖREV: Yukarıdaki bilgileri kullanarak kullanıcıya bu kişiyi tanıt. Şunları yap:
+1. Kişinin adını ve e-postasını paylaş
+2. Bu kişinin kullanıcının sorusuyla NEDEN ilgili olduğunu açıkla (bağlam kısmından çıkar)
+3. Nasıl iletişim kurabileceklerini öner (e-posta gönder, toplantı ayarla vs.)
+Kısa ve doğal konuş.`;
+
+                console.log(`[relay] Introduction revealed: ${contributorName} (${contributorEmail}) to ${userEmail}`);
               }
             }
           } catch (err) {

@@ -83,6 +83,8 @@ export async function searchKnowledgeBase(query, { date_from = null, date_to = n
           contributor_email: null, // strip identity
           brokerableConnection: true,
           original_contributor_email: result.contributor_email, // keep for introduction request
+          original_document_title: result.document_title,
+          original_content_snippet: result.content.substring(0, 300),
         };
       }
       return { ...result, brokerableConnection: false };
