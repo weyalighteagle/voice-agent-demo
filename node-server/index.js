@@ -594,8 +594,6 @@ Bilgi tabanı arama sonuçlarında "brokerableConnection=true" etiketi gördüğ
                   contentSnippet: brokeredResult.original_content_snippet || null,
                   meetingDate: brokeredResult.meeting_date || null,
                 };
-              } else {
-                lastBrokeredContributor = null;
               }
             } catch (err) {
               console.error("[relay] KB search error:", err);
